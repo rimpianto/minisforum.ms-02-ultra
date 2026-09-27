@@ -1,6 +1,14 @@
 #!/bin/bash
-# ccr-linksafe-reboot v1.3 — reboot the CCR2004-1G-2XS-PCIe card with the
-# PCIe LINK disabled, so the card's reset glitch cannot freeze the host.
+# ccr-linksafe-reboot v1.7 — reboot / upgrade the CCR2004-1G-2XS-PCIe card
+# with the PCIe LINK disabled, so the card's reset glitch cannot freeze
+# the host.
+#
+# v1.6: PHASE A rewritten: keep an already-staged download (re-checking
+#       cancels it), poll the async status to settle, parse LAST values;
+#       requires working ssh to the card (key or PASSCMD).
+# v1.7: wait_card probes ssh too — ping answers mid-boot, so VERIFY used
+#       to capture empty output; also key-based ssh from the host is the
+#       recommended auth (no passwords on the host).
 #
 # Validated 5/5 on a Minisforum MS-02 Ultra (Arrow Lake-HX, Proxmox VE
 # 7.0.14-19-pve, RouterOS 7.24.4). See the repo report for the full test
@@ -10,26 +18,35 @@
 #   The card disturbs the PCIe FABRIC during its reset — removing the PCI
 #   functions is NOT enough (1-in-2 silent platform freezes in our tests).
 #   The disturbance travels on the LINK, so we disable the link itself
-#   (LnkDisable, LnkCtl bit 4 on the root port) before telling the card
-#   to reboot. With the link down, the host survived 4/4 card reboots.
+#   (LnkDisable, LnkCtl bit 4 on the root port) before the card reboots.
+#   With the link down, the host survived every run (5/5).
+#
+# MODES:
+#   (default)        plain card reboot (isolated), then final host warm reboot
+#   --upgrade       full RouterOS + firmware update flow:
+#                     A. package download (link still up, zero downtime)
+#                     B. isolate the host (quiesce + remove + LnkDisable)
+#                     C. package update install  -> card reboot #1 (RouterOS)
+#                     D. routerboard upgrade      -> card reboot #2 (firmware)
+#                     E. verify versions, re-enable link, final host warm reboot
+#   --auto           unattended (WAN-safe): the final host warm reboot is
+#                   scheduled by the script itself + a +30 min failsafe
+#                   reboot is armed upfront and cancelled on success.
+#                   Fully unattended cycle: ~6 min (plain) / ~15-20 min (upgrade)
+#   (--upgrade --auto combine: launch over SSH/WireGuard, disconnect,
+#    everything returns by itself — card on new RouterOS+firmware, host up,
+#    card enumerated)
 #
 # KNOWN LIMITS (verified, card-side):
 #   - The link does NOT re-train when LnkDisable is cleared at runtime,
 #     and the host DMA engine stays wedged after the card reset: the
-#     procedure MUST end with a host warm reboot. --auto schedules it
-#     itself; without --auto you reboot by hand when the script says so.
+#     procedure MUST end with a host warm reboot.
 #   - The card never re-enumerates after its own reboot while the host
 #     stays up; it enumerates cleanly at the next host boot.
 #
-# USAGE:
-#   ccr-linksafe-reboot          # interactive/lab: you give the final reboot
-#   ccr-linksafe-reboot --auto   # unattended (WAN): script schedules the
-#                                # final warm reboot itself, ~6 min total
-#
 # CONFIGURATION — set for your host (env vars or edit the defaults):
 #   CARD_IP    management IP of the card (its ether1, out-of-band LAN)
-#   CARD_USER  RouterOS user (needs ssh + reboot rights)
-#   CARD_PASS  use sshpass (or better: an ssh key) — see PASSCMD
+#   CARD_USER  RouterOS user (needs ssh + reboot + update rights)
 #   PASSCMD    command that prints the ssh password (e.g. "cat /root/.ccrpass")
 #              leave empty if you use key-based ssh
 #   GW         gateway of the data LAN ("" if the mgmt LAN is directly
@@ -58,21 +75,99 @@ CARD_IFS=${CARD_IFS:-"nic0 nic1 nic2 nic5"}   # ALL interfaces of the card
 MTU=${MTU:-1600}
 LOG=${LOG:-/var/log/ccr-linksafe-reboot.log}
 AUTO=0
-[ "${1:-}" = "--auto" ] && AUTO=1
+UPGRADE=0
+for a in "$@"; do
+    case "$a" in
+        --auto) AUTO=1 ;;
+        --upgrade) UPGRADE=1 ;;
+    esac
+done
 
 log() { echo "$(date +%T) [ccr-linksafe] $*" | tee -a "$LOG"; }
 
-run_on_card() {
+run_on_card() {   # $1 = command, $2 = timeout (default 15)
+    local t=${2:-15}
     if [ -n "$PASSCMD" ]; then
-        timeout 15 sshpass -p "$($PASSCMD)" ssh -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=8 "$CARD_USER@$CARD_IP" "$1"
+        timeout "$t" sshpass -p "$($PASSCMD)" ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=8 "$CARD_USER@$CARD_IP" "$1" 2>/dev/null
     else
-        timeout 15 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-            "$CARD_USER@$CARD_IP" "$1"
+        timeout "$t" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+            "$CARD_USER@$CARD_IP" "$1" 2>/dev/null
     fi
 }
 
-# --- 1. control path via CTRL_IF (BEFORE touching the card) ---
+wait_card() {     # $1 = max seconds; returns 0 if card answered ping
+    local max=${1:-240} waited=0
+    while [ $waited -lt $max ]; do
+        sleep 5; waited=$((waited+5))
+        if timeout 3 ping -c 1 -W 2 "$CARD_IP" >/dev/null 2>&1; then
+            # ping answers BEFORE ssh is ready (mid-boot): probe ssh too,
+            # so VERIFY reads real output instead of an empty capture.
+            local j=0
+            while [ $j -lt 18 ]; do
+                run_on_card ":put ready" 10 2>/dev/null | grep -q ready && break
+                sleep 5; j=$((j+5))
+            done
+            sleep 2
+            return 0
+        fi
+    done
+    return 1
+}
+
+cancel_scheduled_reboot() { shutdown -c >/dev/null 2>&1 || true; }
+
+# ============ PHASE A (upgrade mode): download while link is up ============
+MODE="plain reboot"; [ $UPGRADE -eq 1 ] && MODE="RouterOS+firmware upgrade"
+if [ $AUTO -eq 1 ]; then MODE="$MODE, AUTO"; fi
+
+if [ $UPGRADE -eq 1 ]; then
+    if ! timeout 8 ping -c 2 -W 3 "$CARD_IP" >/dev/null 2>&1; then
+        log "ERROR: $CARD_IP unreachable before download, abort (nothing was touched)"
+        exit 1
+    fi
+    log "PHASE A: checking for RouterOS updates (link still up)..."
+    # NB: (a) re-running check-for-updates CANCELS a previously staged
+    #     download — read the current status FIRST and keep it if staged;
+    #     (b) check-for-updates is ASYNC ("finding out latest version...")
+    #     — poll until the status settles, then parse the LAST values.
+    UPD=$(run_on_card "/system package update print" 30)
+    if echo "$UPD" | grep -q "Downloaded, please reboot"; then
+        log "PHASE A: update already downloaded and staged (keeping it)"
+        PKG_UPDATE=1
+    else
+        run_on_card "/system package update check-for-updates" 30 >/dev/null
+        for i in $(seq 1 20); do
+            sleep 3
+            UPD=$(run_on_card "/system package update print" 30)
+            echo "$UPD" | grep -q "finding out" || break
+        done
+        INST=$(echo "$UPD" | awk -F': *' '/installed-version/{v=$2} END{print v}' | tr -d '\r ')
+        LATEST=$(echo "$UPD" | awk -F': *' '/latest-version/{v=$2} END{print v}' | tr -d '\r ')
+        if [ -z "$LATEST" ] || [ "$INST" = "$LATEST" ]; then
+            log "PHASE A: RouterOS $INST is the latest (no package update needed)"
+            PKG_UPDATE=0
+        else
+            log "PHASE A: update $INST -> $LATEST available, downloading (zero-downtime phase)..."
+            run_on_card "/system package update download" 60 >/dev/null
+            DL=""
+            for i in $(seq 1 40); do
+                sleep 5
+                DL=$(run_on_card "/system package update print" 30)
+                if echo "$DL" | grep -q "Downloaded, please reboot"; then break; fi
+            done
+            if echo "$DL" | grep -q "Downloaded, please reboot"; then
+                log "PHASE A: package downloaded and staged"
+                PKG_UPDATE=1
+            else
+                log "PHASE A: download did not complete — abort (nothing touched)"
+                exit 1
+            fi
+        fi
+    fi
+fi
+
+# ============ PHASE B: control path + isolate ==============================
 # The replies to your SSH session may leave via the card (asymmetric
 # routing): pin the default route and a host route to your client via
 # the control NIC, or the quiesce will cut your own session.
@@ -86,7 +181,15 @@ if ! timeout 8 ping -c 2 -W 3 "$CARD_IP" >/dev/null 2>&1; then
     log "ERROR: $CARD_IP unreachable, abort (nothing was touched)"
     exit 1
 fi
-log "STEP1 ok: card reachable (mode: $([ $AUTO -eq 1 ] && echo AUTO || echo manual))"
+log "STEP1 ok: card reachable (mode: $MODE)"
+
+# --auto: arm a +30 min failsafe reboot NOW (if anything hangs mid-flow
+# with the card already rebooted, the host still returns by itself);
+# cancelled on clean completion.
+if [ $AUTO -eq 1 ]; then
+    shutdown -r +30 "ccr-linksafe-reboot AUTO failsafe" >/dev/null 2>&1
+    log "STEP1-pre: +30 min failsafe reboot armed"
+fi
 
 # --- 2. quiesce the driver ---
 ip link set "$BRIDGE_PORT" nomaster 2>/dev/null
@@ -116,28 +219,51 @@ if [ $DL -ne 0 ]; then
     log "STEP4 WARN: link still active (LnkSta=0x$LNKSTA) — ROLLBACK, card NOT rebooted"
     setpci -s "$ROOTPORT" CAP_EXP+10.w=0x$LNKCTL
     echo 1 > /sys/bus/pci/rescan
+    cancel_scheduled_reboot
     log "STEP4: rollback done (link restored, functions recovered by rescan)"
     exit 2
 fi
 log "STEP4 ok: link DISABLED (LnkSta=0x$LNKSTA, DLActive=0)"
 
-# --- 5. schedule the final warm reboot (--auto), then reboot the card ---
-if [ $AUTO -eq 1 ]; then
-    shutdown -r +4 "ccr-linksafe-reboot AUTO: final warm reboot scheduled" >/dev/null 2>&1
-    log "STEP5-pre: final warm reboot SCHEDULED (+4 min)"
-fi
-run_on_card "/system reboot" && log "STEP5: card reboot ordered" \
-    || log "STEP5: ssh closed at reboot (normal)"
+# ============ card reboot cycles (all with the link down) ==================
 
-# --- 6. wait for the card to come back ---
-log "STEP6: waiting for card boot..."
-UP=0
-for i in $(seq 1 48); do
-    sleep 5
-    if timeout 3 ping -c 1 -W 2 "$CARD_IP" >/dev/null 2>&1; then UP=1; break; fi
-done
-[ $UP -eq 1 ] && log "STEP6 ok: card back up after ~$((i*5))s" \
-    || log "STEP6: card not answering yet (continuing anyway)"
+# --- 5/6. first card reboot: plain, or RouterOS package install ---
+if [ $UPGRADE -eq 1 ] && [ "${PKG_UPDATE:-0}" -eq 1 ]; then
+    log "STEP5: ordering package update install (card reboot #1: RouterOS)..."
+    run_on_card "/system package update install" 120 >/dev/null
+    log "STEP5: install ordered (ssh closed at reboot is normal)"
+else
+    run_on_card "/system reboot" && log "STEP5: card reboot ordered" \
+        || log "STEP5: ssh closed at reboot (normal)"
+fi
+
+log "STEP6: waiting for card boot #1..."
+if wait_card 300; then
+    log "STEP6 ok: card back up"
+else
+    log "STEP6 WARN: card not answering after 300s — continuing anyway"
+fi
+
+# --- 5b/6b. upgrade mode: firmware staging + second card reboot ---
+if [ $UPGRADE -eq 1 ]; then
+    log "STEP5b: staging firmware upgrade (/system routerboard upgrade)..."
+    FW=$(run_on_card "/system routerboard upgrade" 60)
+    if echo "$FW" | grep -qi "please reboot\|upgraded"; then
+        log "STEP5b: firmware staged, ordering card reboot #2..."
+        run_on_card "/system reboot" && log "STEP5b: card reboot #2 ordered" \
+            || log "STEP5b: ssh closed at reboot (normal)"
+        log "STEP6b: waiting for card boot #2 (firmware apply — longer boot)..."
+        if wait_card 480; then
+            log "STEP6b ok: card back up after firmware apply"
+        else
+            log "STEP6b WARN: card not answering after 480s — continuing anyway"
+        fi
+    else
+        log "STEP5b: no firmware staging needed (already current)"
+    fi
+    log "VERIFY: installed RouterOS + firmware:"
+    run_on_card "/system package update print; /system routerboard print" 30 | tee -a "$LOG"
+fi
 
 # --- 7. re-enable the link ---
 sleep 10
@@ -176,7 +302,8 @@ ip link set "$BRIDGE_PORT" master "$BRIDGE" 2>/dev/null
 log "STEP9: re-attach attempted"
 
 if [ $AUTO -eq 1 ]; then
-    log "DONE (AUTO) — final warm reboot in progress, host returns by itself (~6 min total)"
+    cancel_scheduled_reboot
+    log "DONE (AUTO) — final warm reboot NOW, host returns by itself"
     shutdown -r now "ccr-linksafe-reboot AUTO: completed" >/dev/null 2>&1 || true
 else
     log "DONE — host alive; run 'reboot' now for the final warm reboot"
