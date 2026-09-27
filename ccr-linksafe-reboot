@@ -1,8 +1,8 @@
 #!/bin/bash
-# ccr-linksafe-reboot v1.2 — reboot the CCR2004-1G-2XS-PCIe card with the
+# ccr-linksafe-reboot v1.3 — reboot the CCR2004-1G-2XS-PCIe card with the
 # PCIe LINK disabled, so the card's reset glitch cannot freeze the host.
 #
-# Validated 4/4 on a Minisforum MS-02 Ultra (Arrow Lake-HX, Proxmox VE
+# Validated 5/5 on a Minisforum MS-02 Ultra (Arrow Lake-HX, Proxmox VE
 # 7.0.14-19-pve, RouterOS 7.24.4). See the repo report for the full test
 # matrix. Host notes: https://github.com/rimpianto/minisforum.ms-02-ultra
 #
