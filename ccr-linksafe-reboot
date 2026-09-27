@@ -1,0 +1,183 @@
+#!/bin/bash
+# ccr-linksafe-reboot v1.2 — reboot the CCR2004-1G-2XS-PCIe card with the
+# PCIe LINK disabled, so the card's reset glitch cannot freeze the host.
+#
+# Validated 4/4 on a Minisforum MS-02 Ultra (Arrow Lake-HX, Proxmox VE
+# 7.0.14-19-pve, RouterOS 7.24.4). See the repo report for the full test
+# matrix. Host notes: https://github.com/rimpianto/minisforum.ms-02-ultra
+#
+# HOW IT WORKS (short version):
+#   The card disturbs the PCIe FABRIC during its reset — removing the PCI
+#   functions is NOT enough (1-in-2 silent platform freezes in our tests).
+#   The disturbance travels on the LINK, so we disable the link itself
+#   (LnkDisable, LnkCtl bit 4 on the root port) before telling the card
+#   to reboot. With the link down, the host survived 4/4 card reboots.
+#
+# KNOWN LIMITS (verified, card-side):
+#   - The link does NOT re-train when LnkDisable is cleared at runtime,
+#     and the host DMA engine stays wedged after the card reset: the
+#     procedure MUST end with a host warm reboot. --auto schedules it
+#     itself; without --auto you reboot by hand when the script says so.
+#   - The card never re-enumerates after its own reboot while the host
+#     stays up; it enumerates cleanly at the next host boot.
+#
+# USAGE:
+#   ccr-linksafe-reboot          # interactive/lab: you give the final reboot
+#   ccr-linksafe-reboot --auto   # unattended (WAN): script schedules the
+#                                # final warm reboot itself, ~6 min total
+#
+# CONFIGURATION — set for your host (env vars or edit the defaults):
+#   CARD_IP    management IP of the card (its ether1, out-of-band LAN)
+#   CARD_USER  RouterOS user (needs ssh + reboot rights)
+#   CARD_PASS  use sshpass (or better: an ssh key) — see PASSCMD
+#   PASSCMD    command that prints the ssh password (e.g. "cat /root/.ccrpass")
+#              leave empty if you use key-based ssh
+#   GW         gateway of the data LAN ("" if the mgmt LAN is directly
+#              attached to a spare NIC), used to route the mgmt traffic
+#              through a NIC that is NOT one of the card's
+#   CTRL_IF    host NIC used as the control path (NOT one of the card's)
+#   ROOTPORT   PCI address of the root port above the card (lspci -t)
+#   CARDPCI    PCI address prefix of the card functions
+#   BRIDGE     host bridge the card's main port is attached to
+#   MTU        MTU to restore on re-attach (match RouterOS l2mtu, e.g. 1600)
+#
+# SAFETY: if the link does not actually go down (DLActive still 1), the
+# script rolls everything back and exits WITHOUT rebooting the card.
+
+set -u
+CARD_IP=${CARD_IP:-192.168.99.148}
+CARD_USER=${CARD_USER:-admin}
+PASSCMD=${PASSCMD:-}          # e.g. "cat /root/.ccrpass"; empty = ssh key
+GW=${GW:-192.168.97.1}
+CTRL_IF=${CTRL_IF:-nic3}       # control NIC, must NOT belong to the card
+ROOTPORT=${ROOTPORT:-00:06.0}
+CARDPCI=${CARDPCI:-0000:01:00}
+BRIDGE=${BRIDGE:-vmbr0}
+BRIDGE_PORT=${BRIDGE_PORT:-nic0}   # card port attached to the bridge
+CARD_IFS=${CARD_IFS:-"nic0 nic1 nic2 nic5"}   # ALL interfaces of the card
+MTU=${MTU:-1600}
+LOG=${LOG:-/var/log/ccr-linksafe-reboot.log}
+AUTO=0
+[ "${1:-}" = "--auto" ] && AUTO=1
+
+log() { echo "$(date +%T) [ccr-linksafe] $*" | tee -a "$LOG"; }
+
+run_on_card() {
+    if [ -n "$PASSCMD" ]; then
+        timeout 15 sshpass -p "$($PASSCMD)" ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=8 "$CARD_USER@$CARD_IP" "$1"
+    else
+        timeout 15 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+            "$CARD_USER@$CARD_IP" "$1"
+    fi
+}
+
+# --- 1. control path via CTRL_IF (BEFORE touching the card) ---
+# The replies to your SSH session may leave via the card (asymmetric
+# routing): pin the default route and a host route to your client via
+# the control NIC, or the quiesce will cut your own session.
+SSH_SRC=${SSH_CLIENT%% *}
+if [ -n "$GW" ]; then
+    ip route replace default via "$GW" dev "$CTRL_IF"
+fi
+[ -n "$SSH_SRC" ] && ip route replace "$SSH_SRC" dev "$CTRL_IF"
+
+if ! timeout 8 ping -c 2 -W 3 "$CARD_IP" >/dev/null 2>&1; then
+    log "ERROR: $CARD_IP unreachable, abort (nothing was touched)"
+    exit 1
+fi
+log "STEP1 ok: card reachable (mode: $([ $AUTO -eq 1 ] && echo AUTO || echo manual))"
+
+# --- 2. quiesce the driver ---
+ip link set "$BRIDGE_PORT" nomaster 2>/dev/null
+for n in $CARD_IFS; do ip link set "$n" down 2>/dev/null; done
+log "STEP2 ok: $BRIDGE_PORT off $BRIDGE, card interfaces down"
+
+# --- 3. remove the PCI functions (driver quiesced) ---
+sleep 3
+for f in 0 1 2 3; do
+    if [ -e "/sys/bus/pci/devices/$CARDPCI.$f" ]; then
+        echo 1 > "/sys/bus/pci/devices/$CARDPCI.$f/remove"
+        log "STEP3: function $CARDPCI.$f removed"
+    else
+        log "STEP3: function $CARDPCI.$f already absent"
+    fi
+done
+
+# --- 4. THE KEY STEP: disable the PCIe LINK on the root port ---
+LNKCTL=$(setpci -s "$ROOTPORT" CAP_EXP+10.w)
+log "STEP4: LnkCtl($ROOTPORT) before = 0x$LNKCTL"
+NEWVAL=$(printf "0x%04x" $(( 0x$LNKCTL | 0x0010 )))
+setpci -s "$ROOTPORT" CAP_EXP+10.w=$NEWVAL
+sleep 3
+LNKSTA=$(setpci -s "$ROOTPORT" CAP_EXP+12.w)
+DL=$(( 0x$LNKSTA & 0x4000 ))   # bit 13: Data Link Layer Active
+if [ $DL -ne 0 ]; then
+    log "STEP4 WARN: link still active (LnkSta=0x$LNKSTA) — ROLLBACK, card NOT rebooted"
+    setpci -s "$ROOTPORT" CAP_EXP+10.w=0x$LNKCTL
+    echo 1 > /sys/bus/pci/rescan
+    log "STEP4: rollback done (link restored, functions recovered by rescan)"
+    exit 2
+fi
+log "STEP4 ok: link DISABLED (LnkSta=0x$LNKSTA, DLActive=0)"
+
+# --- 5. schedule the final warm reboot (--auto), then reboot the card ---
+if [ $AUTO -eq 1 ]; then
+    shutdown -r +4 "ccr-linksafe-reboot AUTO: final warm reboot scheduled" >/dev/null 2>&1
+    log "STEP5-pre: final warm reboot SCHEDULED (+4 min)"
+fi
+run_on_card "/system reboot" && log "STEP5: card reboot ordered" \
+    || log "STEP5: ssh closed at reboot (normal)"
+
+# --- 6. wait for the card to come back ---
+log "STEP6: waiting for card boot..."
+UP=0
+for i in $(seq 1 48); do
+    sleep 5
+    if timeout 3 ping -c 1 -W 2 "$CARD_IP" >/dev/null 2>&1; then UP=1; break; fi
+done
+[ $UP -eq 1 ] && log "STEP6 ok: card back up after ~$((i*5))s" \
+    || log "STEP6: card not answering yet (continuing anyway)"
+
+# --- 7. re-enable the link ---
+sleep 10
+setpci -s "$ROOTPORT" CAP_EXP+10.w=0x$LNKCTL   # original value (LnkDisable=0)
+log "STEP7: LnkDisable cleared, waiting for retrain..."
+for i in $(seq 1 12); do
+    sleep 5
+    LNKSTA=$(setpci -s "$ROOTPORT" CAP_EXP+12.w)
+    DL=$(( 0x$LNKSTA & 0x4000 ))
+    [ $DL -ne 0 ] && break
+done
+if [ $DL -ne 0 ]; then
+    log "STEP7 ok: link UP (DLActive=1, LnkSta=0x$LNKSTA)"
+else
+    log "STEP7 WARN: link still down after 60s (LnkSta=0x$LNKSTA) — expected; the warm reboot closes the procedure"
+fi
+
+# --- 8. rescan (expected to fail until the warm reboot) ---
+echo 1 > /sys/bus/pci/rescan
+sleep 10
+if [ -e "/sys/bus/pci/devices/$CARDPCI.0" ]; then
+    log "STEP8 ok: functions RE-ENUMERATED (hot re-train worked on this platform!)"
+else
+    log "STEP8: rescan #1 failed (expected), retry in 30s"
+    sleep 30
+    echo 1 > /sys/bus/pci/rescan
+    sleep 10
+    [ -e "/sys/bus/pci/devices/$CARDPCI.0" ] \
+        && log "STEP8 ok on second rescan" \
+        || log "STEP8 FAILED: card not re-enumerated (expected — final warm reboot)"
+fi
+
+# --- 9. re-attach attempt (no-op if the card is absent) ---
+ip link set "$BRIDGE_PORT" mtu "$MTU" up 2>/dev/null
+ip link set "$BRIDGE_PORT" master "$BRIDGE" 2>/dev/null
+log "STEP9: re-attach attempted"
+
+if [ $AUTO -eq 1 ]; then
+    log "DONE (AUTO) — final warm reboot in progress, host returns by itself (~6 min total)"
+    shutdown -r now "ccr-linksafe-reboot AUTO: completed" >/dev/null 2>&1 || true
+else
+    log "DONE — host alive; run 'reboot' now for the final warm reboot"
+fi
