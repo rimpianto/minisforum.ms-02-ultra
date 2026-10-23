@@ -397,24 +397,41 @@ async fn kvm_capture(
     }
     session.write_raw(&msg).await?;
 
-    // A key press wakes the screensaver / blanked console before the capture.
-    if let Some(k) = keysym {
-        send_key(session, k).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-    }
-
     request_update(session, 0, 0, fb.width, fb.height).await?;
+    let mut last_key = tokio::time::Instant::now();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut drawn = false;
     let mut updates = 0usize;
+    let mut rects = 0usize;
     let quiet = window.is_some();
     while tokio::time::Instant::now() < deadline {
-        let msg_type = session.read_raw(1).await?[0];
+        // A blanked console sends nothing but a DesktopSize rect; the key has
+        // to be repeated because the first ones land while the host wakes up.
+        if let Some(k) = keysym {
+            if last_key.elapsed() > std::time::Duration::from_millis(1500) {
+                send_key(session, k).await?;
+                last_key = tokio::time::Instant::now();
+            }
+        }
+        let msg_type = match tokio::time::timeout(
+            std::time::Duration::from_millis(1500),
+            session.read_raw(1),
+        )
+        .await
+        {
+            Ok(Ok(buf)) => buf[0],
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => continue, // nothing to draw: keep waking the console
+        };
         match msg_type {
             0 => {
                 let _pad = session.read_raw(1).await?;
                 let nrects = be16(&session.read_raw(2).await?);
+                rects = nrects as usize;
+                if std::env::var("AMT_TRACE").is_ok() {
+                    eprintln!("update with {nrects} rect(s)");
+                }
                 for _ in 0..nrects {
                     let hdr = session.read_raw(12).await?;
                     let (rx, ry) = (be16(&hdr[0..2]), be16(&hdr[2..4]));
@@ -438,6 +455,19 @@ async fn kvm_capture(
                             let mut block = Vec::with_capacity(4 + len);
                             block.extend_from_slice(&(len as u32).to_le_bytes());
                             block.extend_from_slice(&session.read_raw(len).await?);
+                            if let Ok(dir) = std::env::var("AMT_DUMP") {
+                                // Keep the raw block and the inflated tile stream
+                                // so the decoder can be debugged offline.
+                                let n = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_micros())
+                                    .unwrap_or(0);
+                                let _ = std::fs::create_dir_all(&dir);
+                                let _ = std::fs::write(format!("{dir}/{n}-{rx}-{ry}.rle"), &block);
+                                if let Ok(s) = amt_kvm::decoder::rle_stream(&block) {
+                                    let _ = std::fs::write(format!("{dir}/{n}-{rx}-{ry}.raw"), &s);
+                                }
+                            }
                             match amt_kvm::decoder::rle_stream(&block)
                                 .and_then(|stream| {
                                     amt_kvm::decoder::draw_rle_tiles(
@@ -469,6 +499,7 @@ async fn kvm_capture(
                         }
                     }
                 }
+
                 if drawn {
                     updates += 1;
                     let mut lit = 0usize;

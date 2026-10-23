@@ -41,8 +41,14 @@ hardware = the real device.
   `decoder::inflate_partial`. Tiles are always packed as full 64x64 blocks,
   even at the right and bottom edges: consume 4096 pixels regardless of the
   rectangle size or the next tile starts mid-stream.
-- **A blanked console (DPMS) returns an all-black frame.** Send a key first
-  (`kvm --key space`).
+- **A blanked console sends nothing at all.** The device answers the first
+  update with a single `1920x1080` DesktopSize rect and then goes quiet: no
+  tiles, no pixels. `kvm --key shift` re-sends the key every 1.5s, which is the
+  right wire format (`[4, down, 0, 0, keysym_be32]`, the same bytes
+  MeshCommander sends) but on this firmware it did not bring the console back.
+  Touch the physical console and the next capture has content again.
+- **`AMT_DUMP=<dir>`** writes every RLE block and its inflated tile stream to
+  disk, so the decoder can be fixed offline instead of guessing from a PNG.
 
 ## Layout
 
