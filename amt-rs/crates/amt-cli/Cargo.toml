@@ -1,0 +1,19 @@
+[package]
+name = "amt-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+yaml-rust = "0.4"
+winit = "0.29"
+softbuffer = "0.3"
+ratatui = "0.27"
+crossterm = "0.27"
+amt-wsman = { path = "../amt-wsman" }
+# Async runtime required for the WS‑Man client.
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros"] }
+

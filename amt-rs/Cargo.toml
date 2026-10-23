@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/amt-wsman",
+    "crates/amt-redir",
+    "crates/amt-kvm",
+    "crates/amt-cli",
+]
