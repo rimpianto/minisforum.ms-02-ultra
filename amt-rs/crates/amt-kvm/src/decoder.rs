@@ -110,7 +110,11 @@ pub fn draw_rle_tiles(
         let mut tx = 0usize;
         while tx < rw {
             let tw = (rw - tx).min(TILE);
-            let area = tw * th;
+            // The encoder always packs a full 64x64 tile, even at the right
+            // and bottom edges; consuming only tw*th leaves bytes behind and
+            // desynchronises the next tile. Paint outside the rect is clipped
+            // by the framebuffer.
+            let area = TILE * TILE;
             if p >= stream.len() {
                 return Ok(());
             }
