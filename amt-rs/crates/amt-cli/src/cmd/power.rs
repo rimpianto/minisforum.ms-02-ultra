@@ -1,15 +1,37 @@
 use anyhow::{anyhow, Result};
-use amt_wsman::{self, PowerState};
+use amt_wsman::{self, PowerState, get_power_state};
 
 pub fn run(state: Option<String>) -> Result<()> {
     // Load the user configuration (IP, port, credentials)
     let cfg = crate::config::load()?;
 
-    // If no state is supplied we only print a notice – querying the current
-    // power state is not yet implemented.
+    // If no state is supplied we query the current power state via WS‑Man.
     let requested_state = match state.as_deref() {
         None => {
-            println!("Query power state – not implemented in this CLI");
+            // Asynchronously fetch the state.
+            let (ps, rps) = tokio::runtime::Handle::current()
+                .block_on(amt_wsman::get_power_state(&cfg.amt))?;
+            // Map numeric values to friendly names.
+            fn map_state(v: u8) -> &'static str {
+                match v {
+                    1 => "Full Power",
+                    2 => "On",
+                    3 => "Sleep-Light",
+                    4 => "Sleep-Deep",
+                    6 => "Off-Hard",
+                    8 => "Off-Soft",
+                    10 => "Power Cycle Graceful",
+                    11 => "Reset",
+                    _ => "Unknown",
+                }
+            }
+            println!(
+                "PowerState={} ({}) RequestedPowerState={} ({})",
+                ps,
+                map_state(ps),
+                rps,
+                map_state(rps)
+            );
             return Ok(());
         }
         Some(s) => s,

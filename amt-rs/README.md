@@ -18,7 +18,7 @@ Verified against the AMT of this host (dedicated management LAN,
 |---|---|
 | WS-Man power control (`on` / `off` / `reset`) | **works** — HTTP 200, `ReturnValue 0` |
 | `ReturnValue` validation (client no longer trusts "HTTP 2xx = success") | done |
-| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | in progress |
+| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | **works** — prints `PowerState=N (name)` and `RequestedPowerState` |
 | Redirection: session handshake, SOL, IDER, KVM video | skeletons only, not functional |
 
 The redirection crates exist as layout placeholders so the workspace
@@ -73,7 +73,7 @@ HTTP status, is what the client checks.
 
 ```sh
 cargo build --release
-./target/release/amt-cli power              # query current state (in progress)
+./target/release/amt-cli power              # query the current state
 ./target/release/amt-cli power --state on
 ./target/release/amt-cli power --state off
 ./target/release/amt-cli power --state reset
@@ -107,12 +107,16 @@ the Rust client, is a `curl --digest -k` POST of the XML above to
 `https://<host>:16993/wsman`: a `200` with `ReturnValue 0` means
 everything except the client is fine.
 
+`AMT_DEBUG_XML=1` makes the client print the exact SOAP request it sends
+(on stderr). Diffing that against the template above is the fastest way
+to find a broken envelope — a stray backslash or an inserted newline is
+enough to get `SchemaValidationError`.
+
 ## Roadmap
 
-1. Power-state query (finishes the WS-Man crate).
-2. Redirection session handshake and SOL — text console first, no video.
-3. KVM video (RLE8/RLE16/RAW/ZLIB decoders, dirty rectangles) and input.
-4. IDER (virtual CD/floppy), the last piece before this can replace
+1. Redirection session handshake and SOL — text console first, no video.
+2. KVM video (RLE8/RLE16/RAW/ZLIB decoders, dirty rectangles) and input.
+3. IDER (virtual CD/floppy), the last piece before this can replace
    MeshCommander for real work.
 
 ## License
