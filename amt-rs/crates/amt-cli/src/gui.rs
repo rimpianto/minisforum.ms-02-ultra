@@ -8,7 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
 
 /// A decoded frame handed from the network thread to the UI.
