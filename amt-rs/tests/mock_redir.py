@@ -97,6 +97,18 @@ def handle(conn, user, password):
     if not ok:
         return
 
+    if proto == "KVMR":
+        req = recv_n(conn, 8)
+        assert req[0] == 0x40, req.hex()
+        print("  kvm enable received", flush=True)
+        conn.sendall(bytes([0x41]) + b"\x00" * 7)
+        # nothing else to do for a probe
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                return
+            print(f"  kvm traffic {len(data)} bytes", flush=True)
+
     if proto == "SOL":
         # serial settings request
         req = recv_n(conn, 4)

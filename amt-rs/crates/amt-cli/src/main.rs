@@ -20,8 +20,12 @@ enum Commands {
         #[arg(long)]
         state: Option<String>,
     },
-    /// Placeholder – will launch the KVM GUI later
-    Kvm,
+    /// Open a KVM (remote console) session and report the frames it sends
+    Kvm {
+        /// How long to stay connected, in seconds
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+    },
     /// Open a Serial-over-LAN session and print what the console sends
     Sol {
         /// How long to stay connected, in seconds
@@ -73,8 +77,41 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Kvm => {
-            println!("KVM GUI launch – not yet implemented");
+        Commands::Kvm { seconds } => {
+            let redir_port = cfg.amt.port + 1;
+            let mut session = amt_redir::Session::connect(
+                &cfg.amt.host,
+                redir_port,
+                amt_redir::Protocol::Kvm,
+            )
+            .await?;
+            session
+                .handshake(&cfg.amt.username, &cfg.amt.password)
+                .await?;
+            println!(
+                "KVM session established with {}:{}",
+                cfg.amt.host, redir_port
+            );
+
+            let mut frames = 0usize;
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    res = session.read_frame() => match res {
+                        Ok((ty, p)) => {
+                            frames += 1;
+                            println!("frame 0x{:02x} ({} byte di payload)", ty, p.len());
+                        }
+                        Err(e) => {
+                            eprintln!("KVM read: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            println!("{frames} frame ricevuti in {seconds}s");
         }
         Commands::Sol { seconds } => {
             // Redirection listens on the port after WS-Man (16993 -> 16994).
