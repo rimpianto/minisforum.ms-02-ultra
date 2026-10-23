@@ -7,7 +7,8 @@ edition = "2021"
 anyhow = "1.0"
 tokio = { version = "1.28", features = ["full"] }
 bytes = "1.5"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
 md5 = "0.7"
 rand = "0.8"
 thiserror = "1.0"

@@ -1,0 +1,7 @@
+mock AMT redirection on 127.0.0.1:16994
+connection from ('127.0.0.1', 60725)
+  magic=10000000534f4c20 proto=SOL
+  user=admin
+  digest=OK (client=14443f7b73352025fb60ed3496a86906 expected=14443f7b73352025fb60ed3496a86906)
+  sol data b'\r'
+mock: done

@@ -22,8 +22,12 @@ enum Commands {
     },
     /// Placeholder – will launch the KVM GUI later
     Kvm,
-    /// Placeholder – will launch the SOL terminal later
-    Sol,
+    /// Open a Serial-over-LAN session and print what the console sends
+    Sol {
+        /// How long to stay connected, in seconds
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+    },
 }
 
 /// Async entry point – we need a Tokio runtime because the WS‑Man
@@ -72,8 +76,44 @@ async fn main() -> Result<()> {
         Commands::Kvm => {
             println!("KVM GUI launch – not yet implemented");
         }
-        Commands::Sol => {
-            println!("SOL terminal launch – not yet implemented");
+        Commands::Sol { seconds } => {
+            // Redirection listens on the port after WS-Man (16993 -> 16994).
+            let redir_port = cfg.amt.port + 1;
+            let mut session = amt_redir::sol::open(
+                &cfg.amt.host,
+                redir_port,
+                &cfg.amt.username,
+                &cfg.amt.password,
+            )
+            .await?;
+
+            println!(
+                "SOL session established with {}:{}",
+                cfg.amt.host, redir_port
+            );
+            if let Some(settings) = &session.serial_settings {
+                println!("serial settings: {:02x?}", settings);
+            }
+
+            // A bare CR nudges the remote console into producing output.
+            session.sol_send(b"\r").await?;
+
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    res = session.sol_read() => match res {
+                        Ok(Some(data)) => print!("{}", String::from_utf8_lossy(&data)),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("SOL read error: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            println!();
         }
     }
 
