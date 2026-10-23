@@ -11,6 +11,7 @@
 //!   128      run-length: colour, then length = 1 + sum of bytes, 255 continues
 
 use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
 use std::io::Read;
 
 use crate::framebuffer::Framebuffer;
@@ -24,6 +25,37 @@ pub fn decode_zlib(data: &[u8]) -> Result<Vec<u8>, String> {
         .read_to_end(&mut out)
         .map_err(|e| format!("zlib: {e}"))?;
     Ok(out)
+}
+
+/// Intel AMT flushes the deflate stream at the end of every tile block instead
+/// of closing it, so `read_to_end` fails with "incomplete deflate stream" even
+/// when all the data is there. Decompress what arrives and accept a stream
+/// without a final block. Tries zlib framing first, then raw deflate.
+pub fn inflate_partial(data: &[u8]) -> Result<Vec<u8>, String> {
+    fn attempt(data: &[u8], zlib_header: bool) -> Result<Vec<u8>, flate2::DecompressError> {
+        let mut d = Decompress::new(zlib_header);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 65536];
+        let mut input = data;
+        loop {
+            let before_in = d.total_in();
+            let before_out = d.total_out();
+            let status = d.decompress(input, &mut buf, FlushDecompress::Sync)?;
+            let produced = (d.total_out() - before_out) as usize;
+            let consumed = (d.total_in() - before_in) as usize;
+            out.extend_from_slice(&buf[..produced]);
+            input = &input[consumed..];
+            if input.is_empty() || status == Status::StreamEnd || (produced == 0 && consumed == 0) {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    match attempt(data, true) {
+        Ok(out) if !out.is_empty() => Ok(out),
+        _ => attempt(data, false).map_err(|e| format!("inflate: {e}")),
+    }
 }
 
 /// Rect payload of encoding 16: u32 length followed by either an uncompressed
@@ -46,7 +78,11 @@ pub fn rle_stream(block: &[u8]) -> Result<Vec<u8>, String> {
     {
         return Ok(data[5..].to_vec());
     }
-    decode_zlib(data)
+    if std::env::var("AMT_TRACE").is_ok() {
+        let head: Vec<String> = data.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        eprintln!("[amt] rle block {} bytes, head {}", datalen, head.join(" "));
+    }
+    inflate_partial(data)
 }
 
 fn put(fb: &mut Framebuffer, bpp: usize, x: usize, y: usize, v: u16) {

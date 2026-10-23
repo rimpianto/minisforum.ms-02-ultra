@@ -317,11 +317,22 @@ async fn kvm_capture(
     seconds: u64,
     screenshot: Option<&str>,
 ) -> Result<()> {
-    // RAW is mandatory for Intel AMT; RLE is what it actually sends;
-    // DesktopSize lets it tell us about resolution changes.
+    // SetPixelFormat: RGB565 (16 bpp), the format the reference asks for and
+    // the only one we decode today.
+    let mut pf = vec![0u8, 0, 0, 0]; // type 0 + padding
+    pf.extend_from_slice(&[16, 16, 0, 1]); // bpp, depth, big-endian, true-colour
+    pf.extend_from_slice(&31u16.to_be_bytes()); // red max
+    pf.extend_from_slice(&63u16.to_be_bytes()); // green max
+    pf.extend_from_slice(&31u16.to_be_bytes()); // blue max
+    pf.extend_from_slice(&[11, 5, 0, 0, 0, 0]); // shifts + padding
+    session.write_raw(&pf).await?;
+
+    // RAW is mandatory for Intel AMT, RLE is what it actually sends, 1092 and
+    // DesktopSize are what the reference always advertises.
+    let encodings: [i32; 4] = [16, 0, 1092, -223];
     let mut msg = vec![2u8, 0];
-    msg.extend_from_slice(&3u16.to_be_bytes());
-    for encoding in [0i32, 16, -223] {
+    msg.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
+    for encoding in encodings {
         msg.extend_from_slice(&encoding.to_be_bytes());
     }
     session.write_raw(&msg).await?;
@@ -329,6 +340,7 @@ async fn kvm_capture(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut drawn = false;
+    let mut updates = 0usize;
     while tokio::time::Instant::now() < deadline {
         let msg_type = session.read_raw(1).await?[0];
         match msg_type {
@@ -340,6 +352,9 @@ async fn kvm_capture(
                     let (rx, ry) = (be16(&hdr[0..2]), be16(&hdr[2..4]));
                     let (rw, rh) = (be16(&hdr[4..6]), be16(&hdr[6..8]));
                     let encoding = be32(&hdr[8..12]) as i32;
+                    if std::env::var("AMT_TRACE").is_ok() {
+                        eprintln!("rect x={rx} y={ry} w={rw} h={rh} enc={encoding}");
+                    }
                     match encoding {
                         0 => {
                             let payload = session.read_raw(rw * rh * bpp).await?;
@@ -355,26 +370,33 @@ async fn kvm_capture(
                             let mut block = Vec::with_capacity(4 + len);
                             block.extend_from_slice(&(len as u32).to_le_bytes());
                             block.extend_from_slice(&session.read_raw(len).await?);
-                            let stream =
-                                amt_kvm::decoder::rle_stream(&block).map_err(|e| anyhow::anyhow!(e))?;
-                            amt_kvm::decoder::draw_rle_tiles(&stream, bpp, rx, ry, rw, rh, &mut fb)
-                                .map_err(|e| anyhow::anyhow!(e))?;
-                            drawn = true;
+                            match amt_kvm::decoder::rle_stream(&block)
+                                .and_then(|stream| {
+                                    amt_kvm::decoder::draw_rle_tiles(
+                                        &stream, bpp, rx, ry, rw, rh, &mut fb,
+                                    )
+                                }) {
+                                Ok(()) => drawn = true,
+                                Err(e) => eprintln!(
+                                    "rect {rx},{ry} {rw}x{rh}: {e} (tile skipped, frame kept)"
+                                ),
+                            }
                         }
                         -223 => fb.resize(rw, rh),
                         other => anyhow::bail!("unsupported encoding {other}"),
                     }
                 }
                 if drawn {
-                    print_center(&fb);
-                    if let Some(path) = screenshot {
-                        fb.save_png(path).map_err(|e| anyhow::anyhow!(e))?;
-                        println!(
-                            "screenshot written to {} ({}x{})",
-                            path, fb.width, fb.height
-                        );
-                        return Ok(());
+                    updates += 1;
+                    let mut lit = 0usize;
+                    let mut sampled = 0usize;
+                    for px in fb.pixels.chunks_exact(4).step_by(97) {
+                        sampled += 1;
+                        if px[0] > 8 || px[1] > 8 || px[2] > 8 {
+                            lit += 1;
+                        }
                     }
+                    println!("update {updates}: {lit}/{sampled} non-black (sampled)");
                     request_update(session, 0, 0, fb.width, fb.height).await?;
                 }
             }
