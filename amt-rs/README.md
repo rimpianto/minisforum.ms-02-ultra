@@ -12,21 +12,37 @@ wire protocols are documented and small enough to own.
 ## State
 
 Verified against the AMT of this host (dedicated management LAN,
-`192.168.99.153`), October 2026:
+`192.168.99.153`), October 2026. Mock = `tests/mock_redir.py`,
+hardware = the real device.
 
 | Part | State |
 |---|---|
-| WS-Man power control (`on` / `off` / `reset`) | **works** — HTTP 200, `ReturnValue 0` |
+| WS-Man power control (`on` / `off` / `reset`) | **works on hardware** — HTTP 200, `ReturnValue 0` |
 | `ReturnValue` validation (client no longer trusts "HTTP 2xx = success") | done |
-| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | **works** — prints `PowerState=N (name)` and `RequestedPowerState` |
-| Redirection transport + AAAH handshake (SOL, KVM) | **works** — verified end to end against a mock that checks the digest |
-| SOL: settings exchange, send/receive, `--interactive` | **works** against the mock |
-| KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works** against the mock (centre-pixel check + PNG) |
-| KVM window with keyboard and mouse input | not implemented |
+| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | **works on hardware** — prints `PowerState=N (name)` |
+| Redirection transport + AAAH handshake (SOL, KVM) | **works on hardware** — TLS on `16995` (WS-Man port + 2) |
+| SOL: settings exchange, send/receive, `--interactive` | works against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
+| KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works on hardware** — 1920x1080, RGB565, real tiles decoded |
+| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | implemented (winit 0.29 + softbuffer 0.4); builds, opens, streams frames and forwards keys — not yet validated visually on the device |
 | IDER (virtual CD/floppy) | not implemented |
 
-The redirection crates exist as layout placeholders so the workspace
-shape is settled; nothing in them talks to a device yet.
+### What still bites
+
+- **The redirection service accepts one client at a time.** While a
+  MeshCommander session is open (even an abandoned one) every connect gets
+  `StartRedirectionSession refused, status 2`. Stop the other client and wait
+  for the session to time out.
+- **The decoder is not pixel-correct yet.** Geometry and colours are close —
+  the green status bar of the host console lands in the right place — but text
+  comes out as solid blocks. Suspects: run/palette handling inside a tile, or
+  the frame being a text-mode grid rather than a bitmap.
+- **Firmware flushes the deflate stream instead of closing it**, so a
+  `read_to_end` zlib decoder fails with "incomplete deflate stream"; use
+  `decoder::inflate_partial`. Tiles are always packed as full 64x64 blocks,
+  even at the right and bottom edges: consume 4096 pixels regardless of the
+  rectangle size or the next tile starts mid-stream.
+- **A blanked console (DPMS) returns an all-black frame.** Send a key first
+  (`kvm --key space`).
 
 ## Layout
 

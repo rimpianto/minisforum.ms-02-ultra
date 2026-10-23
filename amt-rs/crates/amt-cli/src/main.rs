@@ -1,4 +1,5 @@
 mod config;
+mod gui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -28,6 +29,9 @@ enum Commands {
         /// Save the first full frame to this PNG file instead of opening a window
         #[arg(long)]
         screenshot: Option<String>,
+        /// Send this key before capturing (space, enter, tab, escape, shift)
+        #[arg(long)]
+        key: Option<String>,
     },
     /// Open a Serial-over-LAN session
     Sol {
@@ -83,7 +87,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Kvm { seconds, screenshot } => {
+        Commands::Kvm { seconds, screenshot, key } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
         // without TLS it is WS-Man + 2 as well (16992 -> 16994).
         let redir_port = std::env::var("AMT_REDIR_PORT")
@@ -108,12 +112,29 @@ async fn main() -> Result<()> {
             println!("desktop {}x{} ({} byte per pixel)", w, h, bpp);
 
             let fb = amt_kvm::Framebuffer::new(w, h);
+            let keysym = match key.as_deref() {
+                None => None,
+                Some(name) => Some(keysym_for(name)?),
+            };
+            let window = if screenshot.is_none() {
+                let (frame_tx, input_rx, gui) = gui::channels();
+                std::thread::spawn(move || {
+                    if let Err(e) = gui::run_gui(gui) {
+                        eprintln!("window closed: {e}");
+                    }
+                });
+                Some((frame_tx, input_rx))
+            } else {
+                None
+            };
             kvm_capture(
                 &mut session,
                 bpp,
                 fb,
                 seconds,
                 screenshot.as_deref(),
+                keysym,
+                window,
             )
             .await?;
         }
@@ -310,12 +331,51 @@ fn print_center(fb: &amt_kvm::Framebuffer) {
     println!("non-black pixels: {lit}/{sampled} (sampled)");
 }
 
+/// X11 keysyms for the keys we care about (AMT takes RFB KeyEvent frames).
+fn keysym_for(name: &str) -> Result<u32> {
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "space" => 0x20,
+        "enter" | "return" => 0xFF0D,
+        "tab" => 0xFF09,
+        "escape" | "esc" => 0xFF1B,
+        "shift" => 0xFFE1,
+        "ctrl" | "control" => 0xFFE3,
+        "alt" => 0xFFE9,
+        other if other.len() == 1 => other.as_bytes()[0] as u32,
+        other => anyhow::bail!("unknown key '{other}'"),
+    })
+}
+
+async fn send_pointer(
+    session: &mut amt_redir::Session,
+    x: u16,
+    y: u16,
+    buttons: u8,
+) -> Result<()> {
+    let mut msg = vec![5u8, buttons];
+    msg.extend_from_slice(&x.to_be_bytes());
+    msg.extend_from_slice(&y.to_be_bytes());
+    session.write_raw(&msg).await?;
+    Ok(())
+}
+
+async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
+    for down in [1u8, 0u8] {
+        let mut msg = vec![4u8, down, 0, 0];
+        msg.extend_from_slice(&keysym.to_be_bytes());
+        session.write_raw(&msg).await?;
+    }
+    Ok(())
+}
+
 async fn kvm_capture(
     session: &mut amt_redir::Session,
     bpp: usize,
     mut fb: amt_kvm::Framebuffer,
     seconds: u64,
     screenshot: Option<&str>,
+    keysym: Option<u32>,
+    window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
 ) -> Result<()> {
     // SetPixelFormat: RGB565 (16 bpp), the format the reference asks for and
     // the only one we decode today.
@@ -336,11 +396,19 @@ async fn kvm_capture(
         msg.extend_from_slice(&encoding.to_be_bytes());
     }
     session.write_raw(&msg).await?;
+
+    // A key press wakes the screensaver / blanked console before the capture.
+    if let Some(k) = keysym {
+        send_key(session, k).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
+
     request_update(session, 0, 0, fb.width, fb.height).await?;
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut drawn = false;
     let mut updates = 0usize;
+    let quiet = window.is_some();
     while tokio::time::Instant::now() < deadline {
         let msg_type = session.read_raw(1).await?[0];
         match msg_type {
@@ -386,6 +454,21 @@ async fn kvm_capture(
                         other => anyhow::bail!("unsupported encoding {other}"),
                     }
                 }
+                if let Some((_, input_rx)) = window.as_ref() {
+                    // Input from the window, in the same loop as the video.
+                    while let Ok(ev) = input_rx.try_recv() {
+                        match ev {
+                            gui::Input::Key { keysym, down } => {
+                                let mut msg = vec![4u8, down as u8, 0, 0];
+                                msg.extend_from_slice(&keysym.to_be_bytes());
+                                session.write_raw(&msg).await?;
+                            }
+                            gui::Input::Pointer { x, y, buttons } => {
+                                send_pointer(session, x, y, buttons).await?;
+                            }
+                        }
+                    }
+                }
                 if drawn {
                     updates += 1;
                     let mut lit = 0usize;
@@ -396,7 +479,16 @@ async fn kvm_capture(
                             lit += 1;
                         }
                     }
-                    println!("update {updates}: {lit}/{sampled} non-black (sampled)");
+                    if !quiet {
+                        println!("update {updates}: {lit}/{sampled} non-black (sampled)");
+                    }
+                    if let Some((frame_tx, _)) = window.as_ref() {
+                        let _ = frame_tx.send(gui::Frame {
+                            width: fb.width,
+                            height: fb.height,
+                            pixels: fb.pixels.clone(),
+                        });
+                    }
                     request_update(session, 0, 0, fb.width, fb.height).await?;
                 }
             }
@@ -420,7 +512,7 @@ async fn kvm_capture(
     if let Some(path) = screenshot {
         fb.save_png(path).map_err(|e| anyhow::anyhow!(e))?;
         println!("screenshot written to {} ({}x{})", path, fb.width, fb.height);
-    } else {
+    } else if window.is_none() {
         println!("no frame drawn within {seconds}s");
     }
     Ok(())
