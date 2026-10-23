@@ -6,7 +6,7 @@ Extracted from MeshCommander's `default.htm` (Apache-2.0), functions around
 
 ## Transport
 
-After the AAAH handshake on 16994 with the `KVMR` magic, the client sends
+After the AAAH handshake on **16995** (TLS; 16994 is the plain-text port) with the `KVMR` magic, the client sends
 `0x40` (KVM enable), receives `0x41`, and from that point the stream is **raw
 RFB (VNC) traffic inside the redirection session** — no Intel framing any more.
 MeshCommander forwards the remaining bytes straight to the RFB parser.

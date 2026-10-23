@@ -87,7 +87,8 @@ cargo build --release
 Credentials come from `~/.amt/config.yaml` or from `AMT_HOST`, `AMT_PORT`,
 `AMT_USER`, `AMT_PASS`.
 
-KVM redirection listens one port above WS-Man (16993 → 16994).
+Redirection listens two ports above WS-Man: **16993 → 16995** with TLS
+(16994 is the plain-text variant, used with 16992). Verified on hardware.
 
 ## Configuration
 

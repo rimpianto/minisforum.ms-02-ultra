@@ -28,6 +28,12 @@ use tokio_rustls::TlsStream;
 
 use crate::digest::intel_digest;
 
+fn trace(msg: &str) {
+    if std::env::var("AMT_TRACE").is_ok() {
+        eprintln!("[amt] {msg}");
+    }
+}
+
 pub const AUTH_URI: &str = "/RedirectionService";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +104,10 @@ pub struct Session {
 impl Session {
     pub async fn connect(host: &str, port: u16, protocol: Protocol) -> Result<Self> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
+        // Intel AMT's redirection service is happiest with TLS 1.2; with 1.3
+        // the handshake completes but the service then drops the connection.
         let config = ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(&[&rustls::version::TLS12])
             .context("TLS protocol versions")?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAny(provider)))
@@ -111,9 +119,14 @@ impl Session {
             .with_context(|| format!("TCP connect to {}:{}", host, port))?;
         let _ = tcp.set_nodelay(true);
 
-        let server_name = ServerName::try_from("amt-redirection.local")
-            .context("server name")?
-            .to_owned();
+        // Use the IP as the server name: rustls then sends no SNI at all.
+        // Intel AMT closes the connection when a SNI it does not know arrives.
+        let server_name = match host.parse::<std::net::IpAddr>() {
+            Ok(ip) => ServerName::IpAddress(ip.into()),
+            Err(_) => ServerName::try_from(host.to_string())
+                .context("server name")?
+                .to_owned(),
+        };
         let stream = connector
             .connect(server_name, tcp)
             .await
@@ -194,7 +207,9 @@ impl Session {
     }
 
     pub async fn handshake(&mut self, user: &str, pass: &str) -> Result<()> {
+        trace("tls established, sending protocol magic");
         self.send(self.protocol.magic()).await?;
+        trace("magic sent, waiting for 0x11");
 
         let (ty, p) = self.read_frame().await?;
         if ty != 0x11 {
@@ -205,12 +220,14 @@ impl Session {
         }
 
         // Ask which authentication methods the device supports.
+        trace("got 0x11, querying auth methods");
         self.send(&[0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
             .await?;
         let (ty, p) = self.read_frame().await?;
         if ty != 0x14 {
             bail!("expected AuthenticateSessionReply (0x14), got 0x{:02x}", ty);
         }
+        trace("got auth methods reply");
         let auth_type = p[3];
         let methods = &p[8..];
         if auth_type != 0 {
@@ -240,6 +257,7 @@ impl Session {
         if ty != 0x14 {
             bail!("expected the Digest challenge, got 0x{:02x}", ty);
         }
+        trace("got challenge");
         let status = p[0];
         let auth_type = p[3];
         if status != 1 || auth_type != 4 {
@@ -312,6 +330,7 @@ impl Session {
         }
         self.send(&msg).await?;
 
+        trace("digest sent, waiting for the result");
         let (ty, p) = self.read_frame().await?;
         if ty != 0x14 {
             bail!("expected the authentication result, got 0x{:02x}", ty);
@@ -324,6 +343,7 @@ impl Session {
             );
         }
 
+        trace("authenticated");
         // Protocol start.
         match self.protocol {
             Protocol::Sol => {

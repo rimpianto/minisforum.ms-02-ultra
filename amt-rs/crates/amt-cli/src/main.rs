@@ -84,7 +84,12 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Kvm { seconds, screenshot } => {
-            let redir_port = cfg.amt.port + 1;
+            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
+        // without TLS it is WS-Man + 2 as well (16992 -> 16994).
+        let redir_port = std::env::var("AMT_REDIR_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cfg.amt.port + 2);
             let mut session = amt_redir::Session::connect(
                 &cfg.amt.host,
                 redir_port,
@@ -113,8 +118,12 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Sol { seconds, interactive } => {
-            // Redirection listens on the port after WS-Man (16993 -> 16994).
-            let redir_port = cfg.amt.port + 1;
+            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
+        // without TLS it is WS-Man + 2 as well (16992 -> 16994).
+        let redir_port = std::env::var("AMT_REDIR_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cfg.amt.port + 2);
             let mut session = amt_redir::sol::open(
                 &cfg.amt.host,
                 redir_port,
@@ -290,6 +299,15 @@ fn print_center(fb: &amt_kvm::Framebuffer) {
         "center pixel: R={} G={} B={}",
         fb.pixels[i], fb.pixels[i + 1], fb.pixels[i + 2]
     );
+    let mut lit = 0usize;
+    let mut sampled = 0usize;
+    for px in fb.pixels.chunks_exact(4).step_by(97) {
+        sampled += 1;
+        if px[0] > 8 || px[1] > 8 || px[2] > 8 {
+            lit += 1;
+        }
+    }
+    println!("non-black pixels: {lit}/{sampled} (sampled)");
 }
 
 async fn kvm_capture(
