@@ -49,6 +49,13 @@ impl Framebuffer {
     /// 16-bit RGB565, the format the reference uses for RLE16.
     #[inline]
     pub fn put_rgb565(&mut self, x: usize, y: usize, v: u16) {
+        // Some firmware sends the 16-bit words big-endian regardless of the
+        // pixel format we asked for; AMT_SWAP16=1 flips them for comparison.
+        let v = if std::env::var("AMT_SWAP16").is_ok() {
+            v.swap_bytes()
+        } else {
+            v
+        };
         let r = ((v >> 8) & 0xF8) as u8;
         let g = ((v >> 3) & 0xFC) as u8;
         let b = ((v & 0x1F) << 3) as u8;
