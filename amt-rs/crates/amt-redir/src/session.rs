@@ -133,6 +133,16 @@ impl Session {
         Ok(())
     }
 
+    /// Raw access to the stream, for protocols carried inside the redirection
+    /// session (RFB for KVM, the IDER protocol, ...).
+    pub async fn read_raw(&mut self, n: usize) -> Result<Vec<u8>> {
+        self.read_n(n).await
+    }
+
+    pub async fn write_raw(&mut self, data: &[u8]) -> Result<()> {
+        self.send(data).await
+    }
+
     async fn read_n(&mut self, n: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; n];
         self.stream.read_exact(&mut buf).await.context("read")?;

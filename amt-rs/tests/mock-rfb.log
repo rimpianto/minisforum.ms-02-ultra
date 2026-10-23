@@ -1,0 +1,9 @@
+mock AMT redirection on 127.0.0.1:16994
+connection from ('127.0.0.1', 61300)
+  magic=100100004b564d52 proto=KVMR
+  user=admin
+  digest=OK (client=2822ae97a4f642d8d79bf2235b7883a5 expected=2822ae97a4f642d8d79bf2235b7883a5)
+  kvm enable received
+  setencodings n=3 0000000000000010ffffff21
+  sent one RLE rect
+mock: done

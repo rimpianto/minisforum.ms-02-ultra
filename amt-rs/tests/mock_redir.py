@@ -13,6 +13,7 @@ import socket
 import ssl
 import struct
 import sys
+import zlib
 
 AUTH_URI = "/RedirectionService"
 REALM = "Digest:9b8f1a0e"
@@ -102,12 +103,8 @@ def handle(conn, user, password):
         assert req[0] == 0x40, req.hex()
         print("  kvm enable received", flush=True)
         conn.sendall(bytes([0x41]) + b"\x00" * 7)
-        # nothing else to do for a probe
-        while True:
-            data = conn.recv(4096)
-            if not data:
-                return
-            print(f"  kvm traffic {len(data)} bytes", flush=True)
+        rfb(conn)
+        return
 
     if proto == "SOL":
         # serial settings request
@@ -134,6 +131,45 @@ def handle(conn, user, password):
                 conn.sendall(reply)
             elif data[0] == 0x2B:
                 print("  keepalive", flush=True)
+
+
+
+
+def rfb(conn):
+    """Minimal RFB server: one full-screen rect, RLE encoding, solid colour."""
+    conn.sendall(b"RFB 003.008\n")
+    recv_n(conn, 12)
+    conn.sendall(bytes([1, 1]))  # one security type: None
+    recv_n(conn, 1)
+    conn.sendall(struct.pack(">I", 0))
+    recv_n(conn, 1)  # shared flag
+
+    w = h = 64
+    pixel_format = (bytes([8, 8, 0, 1])
+                    + struct.pack(">HHH", 7, 7, 3)
+                    + bytes([0, 0, 0])
+                    + b"\x00\x00\x00")
+    assert len(pixel_format) == 16
+    conn.sendall(struct.pack(">HH", w, h) + pixel_format
+                 + struct.pack(">I", 4) + b"mock")
+
+    msg_type = recv_n(conn, 1)[0]
+    assert msg_type == 2, msg_type
+    recv_n(conn, 1)
+    n = struct.unpack(">H", recv_n(conn, 2))[0]
+    encs = recv_n(conn, 4 * n)
+    print(f"  setencodings n={n} {encs.hex()}", flush=True)
+
+    msg_type = recv_n(conn, 1)[0]
+    assert msg_type == 3, msg_type
+    recv_n(conn, 9)
+
+    tile = bytes([1, 0x1C])           # sub-encoding 1 (solid), RGB332 0x1C
+    comp = zlib.compress(tile)
+    payload = struct.pack(">I", len(comp)) + comp
+    rect = struct.pack(">HHHH", 0, 0, w, h) + struct.pack(">i", 16)
+    conn.sendall(bytes([0, 0]) + struct.pack(">H", 1) + rect + payload)
+    print("  sent one RLE rect", flush=True)
 
 
 def main():
