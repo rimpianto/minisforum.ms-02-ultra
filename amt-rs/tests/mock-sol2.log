@@ -1,0 +1,9 @@
+mock AMT redirection on 127.0.0.1:16994
+connection from ('127.0.0.1', 61328)
+  magic=10000000534f4c20 proto=SOL
+  user=admin
+  digest=OK (client=d99fe457905c0a2d896479166053f6de expected=d99fe457905c0a2d896479166053f6de)
+  sol data b'\r'
+  sol data b'hello\r'
+error: [Errno 54] Connection reset by peer
+mock: done

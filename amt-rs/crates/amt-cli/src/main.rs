@@ -29,11 +29,14 @@ enum Commands {
         #[arg(long)]
         screenshot: Option<String>,
     },
-    /// Open a Serial-over-LAN session and print what the console sends
+    /// Open a Serial-over-LAN session
     Sol {
-        /// How long to stay connected, in seconds
+        /// How long to stay connected, in seconds (ignored with --interactive)
         #[arg(long, default_value_t = 5)]
         seconds: u64,
+        /// Send what you type on stdin to the console, and print what comes back
+        #[arg(long)]
+        interactive: bool,
     },
 }
 
@@ -109,7 +112,7 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Sol { seconds } => {
+        Commands::Sol { seconds, interactive } => {
             // Redirection listens on the port after WS-Man (16993 -> 16994).
             let redir_port = cfg.amt.port + 1;
             let mut session = amt_redir::sol::open(
@@ -131,17 +134,54 @@ async fn main() -> Result<()> {
             // A bare CR nudges the remote console into producing output.
             session.sol_send(b"\r").await?;
 
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    res = session.sol_read() => match res {
-                        Ok(Some(data)) => print!("{}", String::from_utf8_lossy(&data)),
-                        Ok(None) => {}
-                        Err(e) => {
-                            eprintln!("SOL read error: {e}");
-                            break;
+            if interactive {
+                use std::io::Write as _;
+                use tokio::io::AsyncBufReadExt as _;
+
+                let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+                let mut line = String::new();
+                println!("(interactive: type, Enter sends CR; Ctrl-D quits)");
+                loop {
+                    tokio::select! {
+                        res = session.sol_read() => match res {
+                            Ok(Some(data)) => {
+                                print!("{}", String::from_utf8_lossy(&data));
+                                let _ = std::io::stdout().flush();
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("SOL read error: {e}");
+                                break;
+                            }
+                        },
+                        read = stdin.read_line(&mut line) => match read {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                let mut out = line.trim_end_matches('\n').as_bytes().to_vec();
+                                out.push(b'\r');
+                                session.sol_send(&out).await?;
+                                line.clear();
+                            }
+                            Err(e) => {
+                                eprintln!("stdin: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        res = session.sol_read() => match res {
+                            Ok(Some(data)) => print!("{}", String::from_utf8_lossy(&data)),
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("SOL read error: {e}");
+                                break;
+                            }
                         }
                     }
                 }

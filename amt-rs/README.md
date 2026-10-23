@@ -19,7 +19,11 @@ Verified against the AMT of this host (dedicated management LAN,
 | WS-Man power control (`on` / `off` / `reset`) | **works** — HTTP 200, `ReturnValue 0` |
 | `ReturnValue` validation (client no longer trusts "HTTP 2xx = success") | done |
 | Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | **works** — prints `PowerState=N (name)` and `RequestedPowerState` |
-| Redirection: session handshake, SOL, IDER, KVM video | skeletons only, not functional |
+| Redirection transport + AAAH handshake (SOL, KVM) | **works** — verified end to end against a mock that checks the digest |
+| SOL: settings exchange, send/receive, `--interactive` | **works** against the mock |
+| KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works** against the mock (centre-pixel check + PNG) |
+| KVM window with keyboard and mouse input | not implemented |
+| IDER (virtual CD/floppy) | not implemented |
 
 The redirection crates exist as layout placeholders so the workspace
 shape is settled; nothing in them talks to a device yet.
@@ -73,11 +77,17 @@ HTTP status, is what the client checks.
 
 ```sh
 cargo build --release
-./target/release/amt-cli power              # query the current state
+./target/release/amt-cli power                    # query the current state
 ./target/release/amt-cli power --state on
-./target/release/amt-cli power --state off
-./target/release/amt-cli power --state reset
+./target/release/amt-cli sol --seconds 10         # print the console for 10 s
+./target/release/amt-cli sol --interactive        # type to the console
+./target/release/amt-cli kvm --screenshot out.png # decode one full frame
 ```
+
+Credentials come from `~/.amt/config.yaml` or from `AMT_HOST`, `AMT_PORT`,
+`AMT_USER`, `AMT_PASS`.
+
+KVM redirection listens one port above WS-Man (16993 → 16994).
 
 ## Configuration
 
@@ -114,8 +124,9 @@ enough to get `SchemaValidationError`.
 
 ## Roadmap
 
-1. Redirection session handshake and SOL — text console first, no video.
-2. KVM video (RLE8/RLE16/RAW/ZLIB decoders, dirty rectangles) and input.
+1. KVM window (winit + softbuffer) with keyboard and mouse input — the frame
+   pipeline, decoders and input encoding are the missing glue.
+2. Dirty-rectangle updates instead of a full repaint per frame.
 3. IDER (virtual CD/floppy), the last piece before this can replace
    MeshCommander for real work.
 
