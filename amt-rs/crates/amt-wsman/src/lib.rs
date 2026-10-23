@@ -108,11 +108,32 @@ pub async fn set_power(cfg: &AmtConfig, state: PowerState) -> Result<()> {
         .await
         .context("Authenticated WS‑Man request failed")?;
 
-    if final_resp.status().is_success() {
-        Ok(())
+    // ---------------------------------------------------------------
+    // 7️⃣ Verify the WS‑Man response body contains a successful ReturnValue.
+    // ---------------------------------------------------------------
+    let status = final_resp.status();
+    let body = final_resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        // Look for <g:ReturnValue>0</g:ReturnValue> – the AMT service signals success via this element even when the HTTP status is 2xx.
+        let ret_val = {
+            let start = body.find("<g:ReturnValue>");
+            let end = body.find("</g:ReturnValue>");
+            if let (Some(s), Some(e)) = (start, end) {
+                body[s + "<g:ReturnValue>".len()..e].trim()
+            } else {
+                ""
+            }
+        };
+        if ret_val == "0" {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "WS‑Man request succeeded but ReturnValue is {} – body: {}",
+                ret_val,
+                body
+            ))
+        }
     } else {
-        let status = final_resp.status();
-        let body = final_resp.text().await.unwrap_or_default();
         Err(anyhow!("WS‑Man request returned {} – {}", status, body))
     }
 }

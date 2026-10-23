@@ -13,6 +13,7 @@ Contents:
 3. [The link-disable workaround (LnkDisable)](#3-the-link-disable-workaround)
 4. [Boot hardening: GRUB, panic=, hardware watchdog](#4-boot-hardening)
 5. [Validation matrix](#5-validation-matrix)
+6. [amt-rs: a native AMT client (Rust)](#6-amt-rs)
 
 ---
 
@@ -44,7 +45,8 @@ Once up you get:
 A minimal power-control client (~140 lines of Python, WS-Man Digest over
 TLS) is enough for `status / on / off / cycle`; MeshCommander works for
 interactive use but its KVM is barely usable (no copy-paste, poor
-rendering) — a native rewrite is a separate project.
+rendering) — the native Rust rewrite lives in [amt-rs/](amt-rs/) in this
+repository (see section 6).
 
 **Design rule:** the AMT port and the card management port must be on a
 LAN that does not depend on the host being alive. A small switch and a
@@ -168,6 +170,36 @@ All on BIOS 1.04, Proxmox VE (kernel 7.0.14-19-pve), card on RouterOS
 | Card reset, link disabled | **down** | survived 4/4, kernel alive throughout |
 | Fully unattended cycle (`--auto`) | down | host back in ~6 min, zero intervention |
 | AMT power cycle after a freeze | — | full recovery in ~45 s |
+
+## 6. amt-rs
+
+A native client for Intel AMT, written in Rust, living in
+[`amt-rs/`](amt-rs/) — one static binary, no Node.js. It exists because
+MeshCommander is the only usable AMT console today and its KVM is barely
+workable for real operations (no copy-paste, poor rendering), and because
+the KVM/SOL/IDER protocols are simple enough to be worth owning.
+
+State as of October 2026:
+
+| Part | State |
+|---|---|
+| WS-Man power control (`on` / `off` / `reset`) | works, verified on this host: HTTP 200, `ReturnValue 0` |
+| `ReturnValue` validation (no "2xx = success") | done |
+| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | in progress |
+| Redirection (KVM / SOL / IDER) | skeletons only |
+
+The part that costs the most time on this firmware is the SOAP envelope,
+not the protocol logic. What the AMT here actually accepts:
+
+- `https` only, port **16993** (16992 is closed)
+- no `<w:OptionSet/>`, no `<w:OperationTimeout>`
+- `ManagedElement` must be a complete EPR: `Address` + `ReferenceParameters`
+  with `ResourceURI` for `CIM_ComputerSystem` and a `SelectorSet` with
+  `CreationClassName`/`Name=ManagedSystem`
+- one-line XML, nothing before `<?xml`, Digest auth over TLS
+
+Details, build instructions and the config layout:
+[amt-rs/README.md](amt-rs/README.md).
 
 ---
 

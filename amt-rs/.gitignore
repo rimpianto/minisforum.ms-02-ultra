@@ -1,1 +1,4 @@
 target/
+.amt/
+config.yaml
+*.env
