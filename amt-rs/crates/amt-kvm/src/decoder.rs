@@ -240,6 +240,59 @@ pub fn draw_rle_tiles(
                         }
                     }
                 }
+                // Palette RLE: the firmware uses this for every tile that
+                // contains text. subencoding-128 colours live in the palette,
+                // then each entry is an index byte; an index above 127 starts a
+                // run whose length follows (255 continues).
+                sub if sub > 129 => {
+                    let n = (sub - 128) as usize;
+                    let mut palette: Vec<u16> = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let v = if bpp == 2 {
+                            if p + 2 > stream.len() {
+                                return Err("palette-rle palette truncated".into());
+                            }
+                            let v = u16::from_le_bytes([stream[p], stream[p + 1]]);
+                            p += 2;
+                            v
+                        } else {
+                            if p >= stream.len() {
+                                return Err("palette-rle palette truncated".into());
+                            }
+                            let v = stream[p] as u16;
+                            p += 1;
+                            v
+                        };
+                        palette.push(v);
+                    }
+                    let mut count = 0usize;
+                    while count < area && p < stream.len() {
+                        let index = stream[p];
+                        p += 1;
+                        let v = *palette.get((index % 128) as usize).unwrap_or(&0);
+                        let mut run = 1usize;
+                        if index > 127 {
+                            loop {
+                                if p >= stream.len() {
+                                    break;
+                                }
+                                let b = stream[p];
+                                p += 1;
+                                run += b as usize;
+                                if b != 255 {
+                                    break;
+                                }
+                            }
+                        }
+                        for _ in 0..run {
+                            if count >= area {
+                                break;
+                            }
+                            put(fb, bpp, rx + tx + count % tw, ry + ty + count / tw, v);
+                            count += 1;
+                        }
+                    }
+                }
                 other => return Err(format!("unsupported tile sub-encoding {other}")),
             }
             tx += TILE;

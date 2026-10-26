@@ -23,7 +23,8 @@ hardware = the real device.
 | Redirection transport + AAAH handshake (SOL, KVM) | **works on hardware** — TLS on `16995` (WS-Man port + 2) |
 | SOL: settings exchange, send/receive, `--interactive` | works against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
 | KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works on hardware** — 1920x1080, RGB565, real tiles decoded |
-| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | implemented (winit 0.29 + softbuffer 0.4); builds, opens, streams frames and forwards keys — not yet validated visually on the device |
+| KVM video decoder | **works on hardware** — live capture of the host console, text legible, colours correct |
+| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | implemented (winit 0.29 + softbuffer 0.4); builds, opens, streams frames and forwards keys |
 | IDER (virtual CD/floppy) | not implemented |
 
 ### What still bites
@@ -32,10 +33,14 @@ hardware = the real device.
   MeshCommander session is open (even an abandoned one) every connect gets
   `StartRedirectionSession refused, status 2`. Stop the other client and wait
   for the session to time out.
-- **The decoder is not pixel-correct yet.** Geometry and colours are close —
-  the green status bar of the host console lands in the right place — but text
-  comes out as solid blocks. Suspects: run/palette handling inside a tile, or
-  the frame being a text-mode grid rather than a bitmap.
+- **The firmware encodes every tile that contains text with "palette RLE"**
+  (`subencoding > 129`): `subencoding - 128` RGB565 palette entries, then one
+  index byte per run, where an index above 127 means the run length follows
+  (255 continues). Missing this branch is what made text come out as solid
+  blocks: those tiles were skipped, leaving only the solid background tiles.
+  The branch is now implemented in `decoder::draw_rle_tiles`.
+- **`amt-cli replay <dump-dir>`** rebuilds a PNG from tiles captured with
+  `AMT_DUMP`, which is how the decoder was fixed without a live screen.
 - **Firmware flushes the deflate stream instead of closing it**, so a
   `read_to_end` zlib decoder fails with "incomplete deflate stream"; use
   `decoder::inflate_partial`. Tiles are always packed as full 64x64 blocks,

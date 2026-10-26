@@ -33,6 +33,20 @@ enum Commands {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Rebuild a PNG from tiles captured with AMT_DUMP (offline decoder test)
+    Replay {
+        /// Directory written by AMT_DUMP
+        dir: String,
+        /// Output PNG
+        #[arg(long)]
+        out: String,
+        /// Screen width
+        #[arg(long, default_value_t = 1920)]
+        width: usize,
+        /// Screen height
+        #[arg(long, default_value_t = 1080)]
+        height: usize,
+    },
     /// Open a Serial-over-LAN session
     Sol {
         /// How long to stay connected, in seconds (ignored with --interactive)
@@ -49,6 +63,9 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::Replay { dir, out, width, height } = &cli.command {
+        return replay_tiles(dir, out, *width, *height);
+    }
     let cfg = load()?; // load once, reuse for all sub‑commands
 
     match cli.command {
@@ -87,6 +104,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
         Commands::Kvm { seconds, screenshot, key } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
         // without TLS it is WS-Man + 2 as well (16992 -> 16994).
@@ -364,6 +382,51 @@ async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
         let mut msg = vec![4u8, down, 0, 0];
         msg.extend_from_slice(&keysym.to_be_bytes());
         session.write_raw(&msg).await?;
+    }
+    Ok(())
+}
+
+fn replay_tiles(dir: &str, out: &str, width: usize, height: usize) -> Result<()> {
+
+    let mut fb = amt_kvm::Framebuffer::new(width, height);
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("{dir}: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "raw").unwrap_or(false))
+        .collect();
+    files.sort();
+    let (mut ok, mut bad) = (0usize, 0usize);
+    let mut last_err: Option<String> = None;
+    for f in files {
+        let stem = f
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let parts: Vec<&str> = stem.split('-').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let (x, y) = match (
+            parts[parts.len() - 2].parse::<usize>(),
+            parts[parts.len() - 1].parse::<usize>(),
+        ) {
+            (Ok(x), Ok(y)) => (x, y),
+            _ => continue,
+        };
+        let data = std::fs::read(&f)?;
+        match amt_kvm::decoder::draw_rle_tiles(&data, 2, x, y, 64, 64, &mut fb) {
+            Ok(()) => ok += 1,
+            Err(e) => {
+                bad += 1;
+                last_err = Some(format!("{}: {e}", f.display()));
+            }
+        }
+    }
+    fb.save_png(&out).map_err(|e| anyhow::anyhow!(e))?;
+    println!("{ok} tile disegnati, {bad} errori -> {out}");
+    if let Some(e) = last_err {
+        println!("ultimo errore: {e}");
     }
     Ok(())
 }
