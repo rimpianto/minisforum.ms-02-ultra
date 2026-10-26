@@ -107,6 +107,68 @@ async fn main() -> Result<()> {
         Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
         Commands::Kvm { seconds, screenshot, key } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
+            // without TLS it is WS-Man + 2 as well (16992 -> 16994).
+            let redir_port = std::env::var("AMT_REDIR_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(cfg.amt.port + 2);
+            let keysym = match key.as_deref() {
+                None => None,
+                Some(name) => Some(keysym_for(name)?),
+            };
+
+            if screenshot.is_none() {
+                // On macOS the winit event loop must own the main thread, so the
+                // session gets its own thread and its own tokio runtime.
+                let (frame_tx, input_rx, gui) = gui::channels();
+                let host = cfg.amt.host.clone();
+                let user = cfg.amt.username.clone();
+                let pass = cfg.amt.password.clone();
+                std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Runtime::new() {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            eprintln!("tokio runtime: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    rt.block_on(async move {
+                        if let Err(e) = run_kvm_session(
+                            &host,
+                            redir_port,
+                            &user,
+                            &pass,
+                            seconds,
+                            keysym,
+                            Some((frame_tx, input_rx)),
+                            None,
+                        )
+                        .await
+                        {
+                            eprintln!("kvm: {e}");
+                        }
+                    });
+                    std::process::exit(0);
+                });
+                gui::run_gui(gui)?;
+                return Ok(());
+            }
+
+            run_kvm_session(
+                &cfg.amt.host,
+                redir_port,
+                &cfg.amt.username,
+                &cfg.amt.password,
+                seconds,
+                keysym,
+                None,
+                screenshot,
+            )
+            .await?;
+        }
+        Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
+        Commands::Kvm { seconds, screenshot, key } => {
+            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
         // without TLS it is WS-Man + 2 as well (16992 -> 16994).
         let redir_port = std::env::var("AMT_REDIR_PORT")
             .ok()
@@ -429,6 +491,28 @@ fn replay_tiles(dir: &str, out: &str, width: usize, height: usize) -> Result<()>
         println!("ultimo errore: {e}");
     }
     Ok(())
+}
+
+
+async fn run_kvm_session(
+    host: &str,
+    redir_port: u16,
+    user: &str,
+    pass: &str,
+    seconds: u64,
+    keysym: Option<u32>,
+    window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
+    screenshot: Option<String>,
+) -> Result<()> {
+    let mut session = amt_redir::Session::connect(host, redir_port, amt_redir::Protocol::Kvm).await?;
+    session.handshake(user, pass).await?;
+    println!("KVM session established with {host}:{redir_port}");
+
+    let (w, h, bpp) = rfb_handshake(&mut session).await?;
+    println!("desktop {w}x{h} ({bpp} byte per pixel)");
+
+    let fb = amt_kvm::Framebuffer::new(w, h);
+    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), keysym, window).await
 }
 
 async fn kvm_capture(

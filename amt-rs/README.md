@@ -24,7 +24,7 @@ hardware = the real device.
 | SOL: settings exchange, send/receive, `--interactive` | works against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
 | KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works on hardware** — 1920x1080, RGB565, real tiles decoded |
 | KVM video decoder | **works on hardware** — live capture of the host console, text legible, colours correct |
-| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | implemented (winit 0.29 + softbuffer 0.4); builds, opens, streams frames and forwards keys |
+| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | **opens and streams on hardware** — winit 0.29 + softbuffer 0.4, keys and mouse forwarded as RFB events; input not yet exercised end to end |
 | IDER (virtual CD/floppy) | not implemented |
 
 ### What still bites
@@ -41,6 +41,11 @@ hardware = the real device.
   The branch is now implemented in `decoder::draw_rle_tiles`.
 - **`amt-cli replay <dump-dir>`** rebuilds a PNG from tiles captured with
   `AMT_DUMP`, which is how the decoder was fixed without a live screen.
+- **On macOS the winit event loop must own the main thread.** Creating it on a
+  worker thread panics with "EventLoop must be created on the main thread", so
+  the RFB session runs on its own thread with its own tokio runtime and the
+  window runs on main. `screencapture` needs Screen Recording permission, which
+  is why the window was verified by process state rather than pixel capture.
 - **Firmware flushes the deflate stream instead of closing it**, so a
   `read_to_end` zlib decoder fails with "incomplete deflate stream"; use
   `decoder::inflate_partial`. Tiles are always packed as full 64x64 blocks,
