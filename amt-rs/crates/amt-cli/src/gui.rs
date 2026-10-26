@@ -63,6 +63,10 @@ pub fn run_gui(gui: Gui) -> Result<()> {
     let mut window: Option<Arc<Window>> = None;
     let mut last: Option<Frame> = None;
     let mut redraws = 0u64;
+    // The pointer position stays put between events: a button event that sends
+    // (0,0) teleports the host cursor to the top-left corner.
+    let mut pos = (0u16, 0u16);
+    let mut mask = 0u8;
 
     event_loop.run(move |event, elwt| {
         // Poll the frame channel ~60 times a second. Without this the redraw
@@ -119,9 +123,28 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                         let st = gui.state.lock().unwrap();
                         (st.0.max(1), st.1.max(1))
                     };
-                    let x = (position.x / fw as f64 * 65535.0).clamp(0.0, 65535.0) as u16;
-                    let y = (position.y / fh as f64 * 65535.0).clamp(0.0, 65535.0) as u16;
-                    let _ = gui.input.send(Input::Pointer { x, y, buttons: 0 });
+                    pos.0 = (position.x / fw as f64 * 65535.0).clamp(0.0, 65535.0) as u16;
+                    pos.1 = (position.y / fh as f64 * 65535.0).clamp(0.0, 65535.0) as u16;
+                    let _ = gui.input.send(Input::Pointer {
+                        x: pos.0,
+                        y: pos.1,
+                        buttons: mask,
+                    });
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    // RFB has no wheel: buttons 4 and 5 are one click each.
+                    let up = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                    };
+                    let bit = if up { 8u8 } else { 16u8 };
+                    for buttons in [mask | bit, mask] {
+                        let _ = gui.input.send(Input::Pointer {
+                            x: pos.0,
+                            y: pos.1,
+                            buttons,
+                        });
+                    }
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     let bit = match button {
@@ -130,10 +153,15 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                         MouseButton::Right => 4,
                         _ => 0,
                     };
+                    if state == ElementState::Pressed {
+                        mask |= bit;
+                    } else {
+                        mask &= !bit;
+                    }
                     let _ = gui.input.send(Input::Pointer {
-                        x: 0,
-                        y: 0,
-                        buttons: if state == ElementState::Pressed { bit } else { 0 },
+                        x: pos.0,
+                        y: pos.1,
+                        buttons: mask,
                     });
                 }
                 WindowEvent::RedrawRequested => {

@@ -112,10 +112,6 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(cfg.amt.port + 2);
-            let keysym = match key.as_deref() {
-                None => None,
-                Some(name) => Some(keysym_for(name)?),
-            };
 
             if screenshot.is_none() {
                 // On macOS the winit event loop must own the main thread, so the
@@ -139,7 +135,7 @@ async fn main() -> Result<()> {
                             &user,
                             &pass,
                             seconds,
-                            keysym,
+                            key.clone(),
                             Some((frame_tx, input_rx)),
                             None,
                         )
@@ -160,7 +156,7 @@ async fn main() -> Result<()> {
                 &cfg.amt.username,
                 &cfg.amt.password,
                 seconds,
-                keysym,
+                key,
                 None,
                 screenshot,
             )
@@ -396,6 +392,32 @@ async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
     Ok(())
 }
 
+/// "ctrl+l" means: hold ctrl, press l, release ctrl.
+async fn send_chord(session: &mut amt_redir::Session, spec: &str) -> Result<()> {
+    let parts: Vec<&str> = spec.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return send_key(session, keysym_for(spec)?).await;
+    }
+    let mods: Vec<u32> = parts[..parts.len() - 1]
+        .iter()
+        .map(|m| keysym_for(m))
+        .collect::<Result<_>>()?;
+    let last = keysym_for(parts[parts.len() - 1])?;
+
+    for m in &mods {
+        let mut msg = vec![4u8, 1, 0, 0];
+        msg.extend_from_slice(&m.to_be_bytes());
+        session.write_raw(&msg).await?;
+    }
+    send_key(session, last).await?;
+    for m in mods.iter().rev() {
+        let mut msg = vec![4u8, 0, 0, 0];
+        msg.extend_from_slice(&m.to_be_bytes());
+        session.write_raw(&msg).await?;
+    }
+    Ok(())
+}
+
 fn replay_tiles(dir: &str, out: &str, width: usize, height: usize) -> Result<()> {
 
     let mut fb = amt_kvm::Framebuffer::new(width, height);
@@ -448,7 +470,7 @@ async fn run_kvm_session(
     user: &str,
     pass: &str,
     seconds: u64,
-    keysym: Option<u32>,
+    key: Option<String>,
     window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
     screenshot: Option<String>,
 ) -> Result<()> {
@@ -475,7 +497,7 @@ async fn run_kvm_session(
     eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
-    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), keysym, window).await
+    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, window).await
 }
 
 async fn kvm_capture(
@@ -484,7 +506,7 @@ async fn kvm_capture(
     mut fb: amt_kvm::Framebuffer,
     seconds: u64,
     screenshot: Option<&str>,
-    keysym: Option<u32>,
+    key: Option<String>,
     window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
 ) -> Result<()> {
     // SetPixelFormat: RGB565 (16 bpp), the format the reference asks for and
@@ -509,22 +531,40 @@ async fn kvm_capture(
 
     request_update(session, 0, 0, fb.width, fb.height).await?;
     let mut last_key = tokio::time::Instant::now();
+    let mut last_request = tokio::time::Instant::now();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut drawn = false;
     let mut updates = 0usize;
     let quiet = window.is_some();
     while tokio::time::Instant::now() < deadline {
+        // Input first: a static screen sends no framebuffer updates at all, so
+        // draining input only when a frame arrives makes the keyboard and mouse
+        // dead exactly when the console is idle.
+        if let Some((_, input_rx)) = window.as_ref() {
+            while let Ok(ev) = input_rx.try_recv() {
+                match ev {
+                    gui::Input::Key { keysym, down } => {
+                        let mut msg = vec![4u8, down as u8, 0, 0];
+                        msg.extend_from_slice(&keysym.to_be_bytes());
+                        session.write_raw(&msg).await?;
+                    }
+                    gui::Input::Pointer { x, y, buttons } => {
+                        send_pointer(session, x, y, buttons).await?;
+                    }
+                }
+            }
+        }
         // A blanked console sends nothing but a DesktopSize rect; the key has
         // to be repeated because the first ones land while the host wakes up.
-        if let Some(k) = keysym {
+        if let Some(spec) = key.as_deref() {
             if last_key.elapsed() > std::time::Duration::from_millis(1500) {
-                send_key(session, k).await?;
+                send_chord(session, spec).await?;
                 last_key = tokio::time::Instant::now();
             }
         }
         let msg_type = match tokio::time::timeout(
-            std::time::Duration::from_millis(1500),
+            std::time::Duration::from_millis(120),
             session.read_raw(1),
         )
         .await
@@ -532,8 +572,12 @@ async fn kvm_capture(
             Ok(Ok(buf)) => buf[0],
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
-                // Idle: keep polling so the device has a client to answer to.
-                request_update(session, 0, 0, fb.width, fb.height).await?;
+                // Nothing to draw, but keep the session alive and the input
+                // flowing; ask for a frame about once a second.
+                if last_request.elapsed() > std::time::Duration::from_millis(800) {
+                    request_update(session, 0, 0, fb.width, fb.height).await?;
+                    last_request = tokio::time::Instant::now();
+                }
                 continue;
             }
         };
@@ -594,21 +638,6 @@ async fn kvm_capture(
                         }
                         -223 => fb.resize(rw, rh),
                         other => anyhow::bail!("unsupported encoding {other}"),
-                    }
-                }
-                if let Some((_, input_rx)) = window.as_ref() {
-                    // Input from the window, in the same loop as the video.
-                    while let Ok(ev) = input_rx.try_recv() {
-                        match ev {
-                            gui::Input::Key { keysym, down } => {
-                                let mut msg = vec![4u8, down as u8, 0, 0];
-                                msg.extend_from_slice(&keysym.to_be_bytes());
-                                session.write_raw(&msg).await?;
-                            }
-                            gui::Input::Pointer { x, y, buttons } => {
-                                send_pointer(session, x, y, buttons).await?;
-                            }
-                        }
                     }
                 }
 
