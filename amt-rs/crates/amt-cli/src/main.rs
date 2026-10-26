@@ -419,6 +419,9 @@ async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
 
 /// "ctrl+l" means: hold ctrl, press l, release ctrl.
 async fn send_chord(session: &mut amt_redir::Session, spec: &str) -> Result<()> {
+    if std::env::var("AMT_TRACE").is_ok() {
+        eprintln!("[kvm] sending key '{spec}'");
+    }
     let parts: Vec<&str> = spec.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
     if parts.len() < 2 {
         return send_key(session, keysym_for(spec)?).await;
@@ -573,6 +576,13 @@ async fn kvm_capture(
             send_pointer(session, ax, ay, 0).await?;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
+    }
+
+    if std::env::var("AMT_BOGUS").is_ok() {
+        // Does the device parse our stream at all? A bogus type should either
+        // kill the session or be ignored, and that tells us a lot.
+        session.write_raw(&[0x99, 0, 0, 0, 0]).await?;
+        eprintln!("[kvm] sent a bogus message type 0x99");
     }
 
     request_update(session, 0, 0, fb.width, fb.height).await?;
