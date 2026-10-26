@@ -7,8 +7,8 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
 /// A decoded frame handed from the network thread to the UI.
@@ -62,8 +62,15 @@ pub fn run_gui(gui: Gui) -> Result<()> {
     let mut surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>> = None;
     let mut window: Option<Arc<Window>> = None;
     let mut last: Option<Frame> = None;
+    let mut redraws = 0u64;
 
     event_loop.run(move |event, elwt| {
+        // Poll the frame channel ~60 times a second. Without this the redraw
+        // request below feeds itself and the loop spins at tens of thousands
+        // of frames per second, burning a core for nothing.
+        elwt.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16),
+        ));
 
         match event {
             Event::Resumed => {
@@ -84,10 +91,18 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                     NonZeroU32::new(width as u32).unwrap_or(NonZeroU32::new(1).unwrap()),
                     NonZeroU32::new(height as u32).unwrap_or(NonZeroU32::new(1).unwrap()),
                 );
+                if std::env::var("AMT_TRACE").is_ok() {
+                    eprintln!("[gui] window created {}x{}", width, height);
+                }
                 win.request_redraw();
                 window = Some(win);
                 _context = Some(ctx);
                 surface = Some(surf);
+            }
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                if let Some(win) = window.as_ref() {
+                    win.request_redraw();
+                }
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
@@ -151,9 +166,17 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                         }
                     }
 
-                    if let Some(win) = window.as_ref() {
-                        win.request_redraw();
+                    if std::env::var("AMT_TRACE").is_ok() {
+                        redraws += 1;
+                        if redraws % 30 == 0 {
+                            eprintln!(
+                                "[gui] redraw {redraws}, frame {}x{}",
+                                last.as_ref().map(|f| f.width).unwrap_or(0),
+                                last.as_ref().map(|f| f.height).unwrap_or(0)
+                            );
+                        }
                     }
+                    // The next redraw comes from the timer, not from here.
                 }
                 _ => {}
             },

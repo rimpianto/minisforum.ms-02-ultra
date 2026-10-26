@@ -39,6 +39,13 @@ hardware = the real device.
   (255 continues). Missing this branch is what made text come out as solid
   blocks: those tiles were skipped, leaving only the solid background tiles.
   The branch is now implemented in `decoder::draw_rle_tiles`.
+- **Keep asking for updates.** The device answers the first request with a
+  DesktopSize rect and nothing else; a client that only re-requests after
+  painting something stays black forever. Ask again after every update, drawn
+  or not, and again after an idle timeout.
+- **Do not let the redraw request feed itself**: winit repaints in a tight loop
+  (tens of thousands of redraws per second) unless the event loop waits on a
+  timer. The window polls the frame channel at 60 Hz with `ControlFlow::WaitUntil`.
 - **`amt-cli replay <dump-dir>`** rebuilds a PNG from tiles captured with
   `AMT_DUMP`, which is how the decoder was fixed without a live screen.
 - **On macOS the winit event loop must own the main thread.** Creating it on a

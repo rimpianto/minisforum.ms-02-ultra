@@ -452,12 +452,27 @@ async fn run_kvm_session(
     window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
     screenshot: Option<String>,
 ) -> Result<()> {
-    let mut session = amt_redir::Session::connect(host, redir_port, amt_redir::Protocol::Kvm).await?;
+    eprintln!("[kvm] connecting to {host}:{redir_port}");
+    // Plain TCP probe first: if this fails the trouble is not TLS.
+    match std::net::TcpStream::connect_timeout(
+        &format!("{host}:{redir_port}").parse()?,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(_) => eprintln!("[kvm] tcp ok"),
+        Err(e) => eprintln!("[kvm] tcp failed: {e}"),
+    }
+    let mut session = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        amt_redir::Session::connect(host, redir_port, amt_redir::Protocol::Kvm),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TLS connect timed out after 10s"))??;
+    eprintln!("[kvm] TLS up, authenticating");
     session.handshake(user, pass).await?;
-    println!("KVM session established with {host}:{redir_port}");
+    eprintln!("[kvm] KVM session established with {host}:{redir_port}");
 
     let (w, h, bpp) = rfb_handshake(&mut session).await?;
-    println!("desktop {w}x{h} ({bpp} byte per pixel)");
+    eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
     kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), keysym, window).await
@@ -516,7 +531,11 @@ async fn kvm_capture(
         {
             Ok(Ok(buf)) => buf[0],
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => continue, // nothing to draw: keep waking the console
+            Err(_) => {
+                // Idle: keep polling so the device has a client to answer to.
+                request_update(session, 0, 0, fb.width, fb.height).await?;
+                continue;
+            }
         };
         match msg_type {
             0 => {
@@ -613,8 +632,11 @@ async fn kvm_capture(
                             pixels: fb.pixels.clone(),
                         });
                     }
-                    request_update(session, 0, 0, fb.width, fb.height).await?;
                 }
+                // Ask again after every update, drawn or not: the first answer
+                // is often just a DesktopSize rect, and a client that only
+                // re-requests after painting stays black forever.
+                request_update(session, 0, 0, fb.width, fb.height).await?;
             }
             1 => {
                 // SetColourMapEntries: pad, first, count, then 6 bytes per entry
