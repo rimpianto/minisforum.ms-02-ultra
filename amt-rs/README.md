@@ -107,6 +107,9 @@ HTTP status, is what the client checks.
 
 ## Build and run
 
+Step-by-step instructions, including what to look at and what to collect when
+something goes wrong, are in [docs/testing.md](docs/testing.md).
+
 ```sh
 cargo build --release
 ./target/release/amt-cli power                    # query the current state
