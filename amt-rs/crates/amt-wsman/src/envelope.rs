@@ -1,3 +1,5 @@
+// Scaffolding kept for the next step (IDER, WS-Man Get of other classes).
+#![allow(dead_code)]
 // Build SOAP envelope strings
 pub fn envelope_body(action: &str, body: &str) -> String {
     format!(

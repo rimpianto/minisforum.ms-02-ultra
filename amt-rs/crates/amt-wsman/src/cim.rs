@@ -24,6 +24,7 @@ impl PowerState {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum BootSource {
     HardDisk,
     Network,

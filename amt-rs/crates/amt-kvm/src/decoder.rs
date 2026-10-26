@@ -106,7 +106,6 @@ pub fn draw_rle_tiles(
     let mut p = 0usize;
     let mut ty = 0usize;
     while ty < rh {
-        let th = (rh - ty).min(TILE);
         let mut tx = 0usize;
         while tx < rw {
             let tw = (rw - tx).min(TILE);

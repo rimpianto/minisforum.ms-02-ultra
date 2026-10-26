@@ -58,7 +58,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
 
     // Declared in this order so the surface (dropped first) goes before the
     // context it borrows the display from.
-    let mut context: Option<softbuffer::Context<Arc<Window>>> = None;
+    let mut _context: Option<softbuffer::Context<Arc<Window>>> = None;
     let mut surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>> = None;
     let mut window: Option<Arc<Window>> = None;
     let mut last: Option<Frame> = None;
@@ -86,7 +86,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                 );
                 win.request_redraw();
                 window = Some(win);
-                context = Some(ctx);
+                _context = Some(ctx);
                 surface = Some(surf);
             }
             Event::WindowEvent { event, .. } => match event {

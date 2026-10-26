@@ -9,4 +9,5 @@ pub enum AmtWsManError {
     // Add more as needed
 }
 
+#[allow(dead_code)]
 pub type AmtWsManResult<T> = Result<T, AmtWsManError>;

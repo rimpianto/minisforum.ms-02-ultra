@@ -166,58 +166,6 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
-        Commands::Kvm { seconds, screenshot, key } => {
-            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
-        // without TLS it is WS-Man + 2 as well (16992 -> 16994).
-        let redir_port = std::env::var("AMT_REDIR_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(cfg.amt.port + 2);
-            let mut session = amt_redir::Session::connect(
-                &cfg.amt.host,
-                redir_port,
-                amt_redir::Protocol::Kvm,
-            )
-            .await?;
-            session
-                .handshake(&cfg.amt.username, &cfg.amt.password)
-                .await?;
-            println!(
-                "KVM session established with {}:{}",
-                cfg.amt.host, redir_port
-            );
-
-            let (w, h, bpp) = rfb_handshake(&mut session).await?;
-            println!("desktop {}x{} ({} byte per pixel)", w, h, bpp);
-
-            let fb = amt_kvm::Framebuffer::new(w, h);
-            let keysym = match key.as_deref() {
-                None => None,
-                Some(name) => Some(keysym_for(name)?),
-            };
-            let window = if screenshot.is_none() {
-                let (frame_tx, input_rx, gui) = gui::channels();
-                std::thread::spawn(move || {
-                    if let Err(e) = gui::run_gui(gui) {
-                        eprintln!("window closed: {e}");
-                    }
-                });
-                Some((frame_tx, input_rx))
-            } else {
-                None
-            };
-            kvm_capture(
-                &mut session,
-                bpp,
-                fb,
-                seconds,
-                screenshot.as_deref(),
-                keysym,
-                window,
-            )
-            .await?;
-        }
         Commands::Sol { seconds, interactive } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
         // without TLS it is WS-Man + 2 as well (16992 -> 16994).
@@ -550,7 +498,6 @@ async fn kvm_capture(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut drawn = false;
     let mut updates = 0usize;
-    let mut rects = 0usize;
     let quiet = window.is_some();
     while tokio::time::Instant::now() < deadline {
         // A blanked console sends nothing but a DesktopSize rect; the key has
@@ -575,7 +522,6 @@ async fn kvm_capture(
             0 => {
                 let _pad = session.read_raw(1).await?;
                 let nrects = be16(&session.read_raw(2).await?);
-                rects = nrects as usize;
                 if std::env::var("AMT_TRACE").is_ok() {
                     eprintln!("update with {nrects} rect(s)");
                 }
