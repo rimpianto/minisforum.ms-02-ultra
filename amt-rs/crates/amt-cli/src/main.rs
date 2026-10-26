@@ -32,6 +32,12 @@ enum Commands {
         /// Send this key before capturing (space, enter, tab, escape, shift)
         #[arg(long)]
         key: Option<String>,
+        /// Send the pointer to this pixel position ("x,y") before capturing
+        #[arg(long)]
+        pointer: Option<String>,
+        /// Click the left button after moving the pointer
+        #[arg(long)]
+        click: bool,
     },
     /// Rebuild a PNG from tiles captured with AMT_DUMP (offline decoder test)
     Replay {
@@ -105,13 +111,23 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
-        Commands::Kvm { seconds, screenshot, key } => {
+        Commands::Kvm { seconds, screenshot, key, pointer, click } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
             // without TLS it is WS-Man + 2 as well (16992 -> 16994).
             let redir_port = std::env::var("AMT_REDIR_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(cfg.amt.port + 2);
+
+            let pointer_xy = match pointer.as_deref() {
+                None => None,
+                Some(spec) => {
+                    let (x, y) = spec
+                        .split_once(',')
+                        .ok_or_else(|| anyhow::anyhow!("--pointer wants \"x,y\""))?;
+                    Some((x.trim().parse::<u16>()?, y.trim().parse::<u16>()?))
+                }
+            };
 
             if screenshot.is_none() {
                 // On macOS the winit event loop must own the main thread, so the
@@ -136,6 +152,8 @@ async fn main() -> Result<()> {
                             &pass,
                             seconds,
                             key.clone(),
+                            pointer_xy,
+                            click,
                             Some((frame_tx, input_rx)),
                             None,
                         )
@@ -157,6 +175,8 @@ async fn main() -> Result<()> {
                 &cfg.amt.password,
                 seconds,
                 key,
+                pointer_xy,
+                click,
                 None,
                 screenshot,
             )
@@ -384,11 +404,16 @@ async fn send_pointer(
 }
 
 async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
-    for down in [1u8, 0u8] {
-        let mut msg = vec![4u8, down, 0, 0];
-        msg.extend_from_slice(&keysym.to_be_bytes());
-        session.write_raw(&msg).await?;
-    }
+    let mut msg = vec![4u8, 1, 0, 0];
+    msg.extend_from_slice(&keysym.to_be_bytes());
+    session.write_raw(&msg).await?;
+    // A real keyboard holds a key for tens of milliseconds; sending down and
+    // up in the same instant is what a client does and what the firmware may
+    // drop.
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let mut msg = vec![4u8, 0, 0, 0];
+    msg.extend_from_slice(&keysym.to_be_bytes());
+    session.write_raw(&msg).await?;
     Ok(())
 }
 
@@ -471,6 +496,8 @@ async fn run_kvm_session(
     pass: &str,
     seconds: u64,
     key: Option<String>,
+    pointer: Option<(u16, u16)>,
+    click: bool,
     window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
     screenshot: Option<String>,
 ) -> Result<()> {
@@ -497,7 +524,7 @@ async fn run_kvm_session(
     eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
-    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, window).await
+    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, pointer, click, window).await
 }
 
 async fn kvm_capture(
@@ -507,17 +534,22 @@ async fn kvm_capture(
     seconds: u64,
     screenshot: Option<&str>,
     key: Option<String>,
+    pointer: Option<(u16, u16)>,
+    click: bool,
     window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
 ) -> Result<()> {
-    // SetPixelFormat: RGB565 (16 bpp), the format the reference asks for and
-    // the only one we decode today.
-    let mut pf = vec![0u8, 0, 0, 0]; // type 0 + padding
-    pf.extend_from_slice(&[16, 16, 0, 1]); // bpp, depth, big-endian, true-colour
-    pf.extend_from_slice(&31u16.to_be_bytes()); // red max
-    pf.extend_from_slice(&63u16.to_be_bytes()); // green max
-    pf.extend_from_slice(&31u16.to_be_bytes()); // blue max
-    pf.extend_from_slice(&[11, 5, 0, 0, 0, 0]); // shifts + padding
-    session.write_raw(&pf).await?;
+    // RGB565 is the device default; the reference only sends SetPixelFormat
+    // when it wants 8 bpp. Sending it unconditionally is a byte the firmware
+    // does not expect, so keep the wire identical to the reference.
+    if bpp != 2 {
+        let mut pf = vec![0u8, 0, 0, 0];
+        pf.extend_from_slice(&[8, 8, 0, 1]);
+        pf.extend_from_slice(&7u16.to_be_bytes());
+        pf.extend_from_slice(&7u16.to_be_bytes());
+        pf.extend_from_slice(&3u16.to_be_bytes());
+        pf.extend_from_slice(&[5, 2, 0, 0, 0, 0]);
+        session.write_raw(&pf).await?;
+    }
 
     // RAW is mandatory for Intel AMT, RLE is what it actually sends, 1092 and
     // DesktopSize are what the reference always advertises.
@@ -528,6 +560,20 @@ async fn kvm_capture(
         msg.extend_from_slice(&encoding.to_be_bytes());
     }
     session.write_raw(&msg).await?;
+
+    if let Some((px, py)) = pointer {
+        // Pixel coordinates to RFB's 0..65535 absolute space.
+        let ax = ((px as f64 / fb.width.max(1) as f64) * 65535.0).clamp(0.0, 65535.0) as u16;
+        let ay = ((py as f64 / fb.height.max(1) as f64) * 65535.0).clamp(0.0, 65535.0) as u16;
+        send_pointer(session, ax, ay, 0).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        if click {
+            send_pointer(session, ax, ay, 1).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            send_pointer(session, ax, ay, 0).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
 
     request_update(session, 0, 0, fb.width, fb.height).await?;
     let mut last_key = tokio::time::Instant::now();
