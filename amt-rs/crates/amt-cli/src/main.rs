@@ -368,6 +368,9 @@ async fn main() -> Result<()> {
                 // 0 = attached, 1 = release for a power action, 2 = released,
                 // 3 = release to attach to another machine
                 let link = Arc::new(AtomicU8::new(0));
+                // Where the console asks for a PNG of the frame in hand.
+                let shot: Arc<std::sync::Mutex<Option<String>>> =
+                    Arc::new(std::sync::Mutex::new(None));
 
                 // Session thread: reconnects by itself, because a power reset
                 // kills it and the interesting part (POST, BIOS) comes after.
@@ -377,6 +380,7 @@ async fn main() -> Result<()> {
                     let key = key.clone();
                     let link = link.clone();
                     let target = target.clone();
+                    let shot = shot.clone();
                     std::thread::spawn(move || {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
@@ -418,6 +422,7 @@ async fn main() -> Result<()> {
                                     Some((frame_tx.clone(), input_rx.clone())),
                                     None,
                                     Some(link.clone()),
+                                    Some(shot.clone()),
                                 )
                                 .await;
                                 first = false;
@@ -493,6 +498,7 @@ async fn main() -> Result<()> {
                 {
                     use std::io::IsTerminal;
                     let target = target.clone();
+                    let shot = shot.clone();
                     let cfg = cfg;
                     std::thread::spawn(move || {
                         let rt = match tokio::runtime::Runtime::new() {
@@ -514,7 +520,9 @@ async fn main() -> Result<()> {
                         }
 
                         // One place that runs a command, used by both readers.
-                        let run = |cmd: &str| {
+                        // `raw` keeps the case of a path; `cmd` is the lowered
+                        // form used for matching.
+                        let run = |raw: &str, cmd: &str| {
                             if cmd == "quit" || cmd == "q" || cmd == "exit" {
                                 std::process::exit(0);
                             }
@@ -529,7 +537,45 @@ async fn main() -> Result<()> {
                                 println!("  {}      list the configured machines", bold("machines"));
                                 println!("  {}   attach this window to another machine", bold("use <name>"));
                                 println!("  {}  try the console again after giving up", bold("reconnect"));
+                                println!("  {}   save the current frame as a PNG ([file] optional)", bold("shot"));
                                 println!("  {}          leave the session and close the window", bold("quit"));
+                                return;
+                            }
+                            if cmd == "shot"
+                                || cmd == "screenshot"
+                                || cmd.starts_with("shot ")
+                                || cmd.starts_with("screenshot ")
+                            {
+                                // The session thread owns the framebuffer: leave
+                                // a path here and it writes it on its next turn.
+                                let given = raw
+                                    .split_once(' ')
+                                    .map(|(_, rest)| rest.trim())
+                                    .filter(|s| !s.is_empty());
+                                let path = match given {
+                                    Some(p) => p.to_string(),
+                                    None => {
+                                        let stamp = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0);
+                                        let dir = std::env::current_dir()
+                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                        dir.join(format!("amt-shot-{stamp}.png"))
+                                            .to_string_lossy()
+                                            .to_string()
+                                    }
+                                };
+                                match shot.lock() {
+                                    Ok(mut slot) => {
+                                        *slot = Some(path.clone());
+                                        // Honest wording: the write happens on the
+                                        // session thread, and only if there is a
+                                        // session with a frame in hand.
+                                        println!("next frame will be written to {path}");
+                                    }
+                                    Err(_) => println!("{} capture slot unavailable", bad("error:")),
+                                }
                                 return;
                             }
                             if cmd == "machines" || cmd == "hosts" {
@@ -616,12 +662,12 @@ async fn main() -> Result<()> {
                                 };
                                 match rl.readline(&format!("{} ", paint_prompt(&prompt, "1;36"))) {
                                     Ok(line) => {
-                                        let cmd = line.trim().to_ascii_lowercase();
-                                        if cmd.is_empty() {
+                                        let raw = line.trim().to_string();
+                                        if raw.is_empty() {
                                             continue;
                                         }
-                                        let _ = rl.add_history_entry(cmd.as_str());
-                                        run(&cmd);
+                                        let _ = rl.add_history_entry(raw.as_str());
+                                        run(&raw, &raw.to_ascii_lowercase());
                                     }
                                     Err(rustyline::error::ReadlineError::Interrupted) => continue,
                                     Err(rustyline::error::ReadlineError::Eof) => break,
@@ -643,11 +689,11 @@ async fn main() -> Result<()> {
                                     Ok(l) => l,
                                     Err(_) => break,
                                 };
-                                let cmd = line.trim().to_ascii_lowercase();
-                                if cmd.is_empty() {
+                                let raw = line.trim().to_string();
+                                if raw.is_empty() {
                                     continue;
                                 }
-                                run(&cmd);
+                                run(&raw, &raw.to_ascii_lowercase());
                             }
                         }
                     });
@@ -668,6 +714,7 @@ async fn main() -> Result<()> {
                 click,
                 None,
                 screenshot,
+                None,
                 None,
             )
             .await?;
@@ -1129,6 +1176,7 @@ async fn run_kvm_session(
     )>,
     screenshot: Option<String>,
     link: Option<Arc<AtomicU8>>,
+    shot: Option<Arc<std::sync::Mutex<Option<String>>>>,
 ) -> Result<()> {
     eprintln!("[kvm] connecting to {host}:{redir_port}");
     // Plain TCP probe first: if this fails the trouble is not TLS.
@@ -1153,7 +1201,20 @@ async fn run_kvm_session(
     eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
-    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, pointer, click, window, link).await
+    kvm_capture(
+        &mut session,
+        bpp,
+        fb,
+        seconds,
+        screenshot.as_deref(),
+        key,
+        pointer,
+        click,
+        window,
+        link,
+        shot,
+    )
+    .await
 }
 
 async fn kvm_capture(
@@ -1170,6 +1231,7 @@ async fn kvm_capture(
         std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<gui::Input>>>,
     )>,
     link: Option<Arc<AtomicU8>>,
+    shot: Option<Arc<std::sync::Mutex<Option<String>>>>,
 ) -> Result<()> {
     // RGB565 is the device default; the reference only sends SetPixelFormat
     // when it wants 8 bpp. Sending it unconditionally is a byte the firmware
@@ -1232,6 +1294,20 @@ async fn kvm_capture(
             if link.load(Ordering::Relaxed) != 0 {
                 eprintln!("[kvm] releasing the session (power action or machine switch)");
                 return Ok(());
+            }
+        }
+        // The console can ask for a PNG at any moment: the frame in hand is
+        // already decoded, so it costs one file write and no extra round trip.
+        if let Some(slot) = shot.as_ref() {
+            let wanted = slot.lock().ok().and_then(|mut s| s.take());
+            if let Some(path) = wanted {
+                match fb.save_png(&path) {
+                    Ok(()) => println!(
+                        "screenshot written to {} ({}x{})",
+                        path, fb.width, fb.height
+                    ),
+                    Err(e) => println!("screenshot failed: {e}"),
+                }
             }
         }
         // Input first: a static screen sends no framebuffer updates at all, so
