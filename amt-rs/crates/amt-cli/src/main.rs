@@ -421,19 +421,28 @@ async fn main() -> Result<()> {
 
 /// Human-readable name for a CIM power state value.
 fn state_name(v: u8) -> &'static str {
+    // Intel AMT power state values, as reported by
+    // CIM_AssociatedPowerManagementService.
     match v {
         0 => "Unknown",
         1 => "Full Power",
         2 => "On",
         3 => "Sleep-Light",
         4 => "Sleep-Deep",
-        5 => "Power Cycle (Hard Off)",
+        5 => "Power Cycle (Off-Soft)",
         6 => "Off-Hard",
-        7 => "Hibernate",
+        7 => "Hibernate (Off-Soft)",
         8 => "Off-Soft",
-        9 => "Off-Hard Graceful",
-        10 => "Power Cycle Graceful",
-        11 => "Reset",
+        9 => "Power Cycle (Off-Hard)",
+        10 => "Reset (Hard)",
+        11 => "Diagnostic Interrupt (NMI)",
+        12 => "Off-Hard Graceful",
+        13 => "Reset Graceful",
+        14 => "Off-Soft Graceful",
+        15 => "Power Cycle (Off-Soft Graceful)",
+        16 => "Power Cycle (Off-Hard Graceful)",
+        17 => "Reset to Diagnostic",
+        200 => "Power On to Diagnostic",
         _ => "Unrecognised",
     }
 }
@@ -702,7 +711,11 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
         }
         "status" => {
             let (p, r) = amt_wsman::get_power_state(ws).await?;
-            println!("PowerState={p} RequestedPowerState={r}");
+            println!(
+                "PowerState={p} ({}) RequestedPowerState={r} ({})",
+                state_name(p),
+                state_name(r)
+            );
         }
         "bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
