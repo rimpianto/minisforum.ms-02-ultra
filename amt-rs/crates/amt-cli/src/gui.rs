@@ -40,41 +40,62 @@ fn modifier_keysym(key: &winit::keyboard::Key) -> Option<u32> {
     }
 }
 
-/// Map a winit key to an RFB keysym: printable ASCII plus what a console needs.
-pub fn key_to_keysym(key: &winit::keyboard::Key) -> Option<u32> {
-    use winit::keyboard::{Key, NamedKey};
-    match key {
+/// Map a winit key to an RFB keysym.
+///
+/// The physical key is preferred: with Option (Alt) held, macOS reports a
+/// different logical key and the function keys stop looking like themselves,
+/// which is exactly how ctrl+alt+f2 was lost. Letters and digits fall back to
+/// the logical character, and Shift stays a held modifier on the host, so a
+/// shifted letter still comes out shifted.
+pub fn key_to_keysym(
+    physical: &winit::keyboard::PhysicalKey,
+    logical: &winit::keyboard::Key,
+) -> Option<u32> {
+    use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+
+    if let PhysicalKey::Code(code) = physical {
+        let mapped = match code {
+            KeyCode::Enter | KeyCode::NumpadEnter => Some(0xFF0D),
+            KeyCode::Tab => Some(0xFF09),
+            KeyCode::Escape => Some(0xFF1B),
+            KeyCode::Backspace => Some(0xFF08),
+            KeyCode::Space => Some(0x20),
+            KeyCode::ArrowUp => Some(0xFF52),
+            KeyCode::ArrowDown => Some(0xFF54),
+            KeyCode::ArrowLeft => Some(0xFF51),
+            KeyCode::ArrowRight => Some(0xFF53),
+            KeyCode::Delete => Some(0xFFFF),
+            KeyCode::Home => Some(0xFF50),
+            KeyCode::End => Some(0xFF57),
+            KeyCode::PageUp => Some(0xFF55),
+            KeyCode::PageDown => Some(0xFF56),
+            KeyCode::Insert => Some(0xFF63),
+            KeyCode::F1 => Some(0xFFBE),
+            KeyCode::F2 => Some(0xFFBF),
+            KeyCode::F3 => Some(0xFFC0),
+            KeyCode::F4 => Some(0xFFC1),
+            KeyCode::F5 => Some(0xFFC2),
+            KeyCode::F6 => Some(0xFFC3),
+            KeyCode::F7 => Some(0xFFC4),
+            KeyCode::F8 => Some(0xFFC5),
+            KeyCode::F9 => Some(0xFFC6),
+            KeyCode::F10 => Some(0xFFC7),
+            KeyCode::F11 => Some(0xFFC8),
+            KeyCode::F12 => Some(0xFFC9),
+            _ => None,
+        };
+        if mapped.is_some() {
+            return mapped;
+        }
+    }
+
+    match logical {
+        Key::Character(s) => s.chars().next().map(|c| c as u32),
+        Key::Named(NamedKey::Space) => Some(0x20),
         Key::Named(NamedKey::Enter) => Some(0xFF0D),
         Key::Named(NamedKey::Tab) => Some(0xFF09),
         Key::Named(NamedKey::Escape) => Some(0xFF1B),
         Key::Named(NamedKey::Backspace) => Some(0xFF08),
-        Key::Named(NamedKey::Space) => Some(0x20),
-        Key::Named(NamedKey::ArrowUp) => Some(0xFF52),
-        Key::Named(NamedKey::ArrowDown) => Some(0xFF54),
-        Key::Named(NamedKey::ArrowLeft) => Some(0xFF51),
-        Key::Named(NamedKey::ArrowRight) => Some(0xFF53),
-        Key::Named(NamedKey::Shift) => Some(0xFFE1),
-        Key::Named(NamedKey::Control) => Some(0xFFE3),
-        Key::Named(NamedKey::Alt) => Some(0xFFE9),
-        Key::Named(NamedKey::Delete) => Some(0xFFFF),
-        Key::Named(NamedKey::Home) => Some(0xFF50),
-        Key::Named(NamedKey::End) => Some(0xFF57),
-        Key::Named(NamedKey::PageUp) => Some(0xFF55),
-        Key::Named(NamedKey::PageDown) => Some(0xFF56),
-        Key::Named(NamedKey::Insert) => Some(0xFF63),
-        Key::Named(NamedKey::F1) => Some(0xFFBE),
-        Key::Named(NamedKey::F2) => Some(0xFFBF),
-        Key::Named(NamedKey::F3) => Some(0xFFC0),
-        Key::Named(NamedKey::F4) => Some(0xFFC1),
-        Key::Named(NamedKey::F5) => Some(0xFFC2),
-        Key::Named(NamedKey::F6) => Some(0xFFC3),
-        Key::Named(NamedKey::F7) => Some(0xFFC4),
-        Key::Named(NamedKey::F8) => Some(0xFFC5),
-        Key::Named(NamedKey::F9) => Some(0xFFC6),
-        Key::Named(NamedKey::F10) => Some(0xFFC7),
-        Key::Named(NamedKey::F11) => Some(0xFFC8),
-        Key::Named(NamedKey::F12) => Some(0xFFC9),
-        Key::Character(s) => s.chars().next().map(|c| c as u32),
         _ => None,
     }
 }
@@ -157,7 +178,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                             let _ = gui.input.send(Input::Modifier { keysym: k, down });
                         }
                     } else if event.state == ElementState::Pressed {
-                        if let Some(k) = key_to_keysym(&event.logical_key) {
+                        if let Some(k) = key_to_keysym(&event.physical_key, &event.logical_key) {
                             let _ = gui.input.send(Input::Key { keysym: k });
                         }
                     }
