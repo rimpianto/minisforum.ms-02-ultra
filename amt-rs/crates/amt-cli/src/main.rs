@@ -209,7 +209,15 @@ async fn main() -> Result<()> {
                             let deadline = tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(seconds);
                             let mut first = true;
+                            let mut failures = 0u32;
                             loop {
+                                // Stay off the device while a power action is
+                                // in progress: the firmware refuses to touch
+                                // the power if a client slips back in first.
+                                while link.load(Ordering::Relaxed) != 0 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                                let started = tokio::time::Instant::now();
                                 let left = deadline.saturating_duration_since(tokio::time::Instant::now());
                                 if left.is_zero() {
                                     break;
@@ -240,8 +248,17 @@ async fn main() -> Result<()> {
                                 if tokio::time::Instant::now() >= deadline {
                                     break;
                                 }
-                                eprintln!("[kvm] reconnecting in 2s...");
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                // A machine that is off drops the session
+                                // straight away: hammering it every two
+                                // seconds fills the terminal for nothing.
+                                if started.elapsed() < std::time::Duration::from_secs(5) {
+                                    failures = failures.saturating_add(1);
+                                } else {
+                                    failures = 0;
+                                }
+                                let delay = 2u64 << failures.min(3);
+                                eprintln!("[kvm] reconnecting in {delay}s...");
+                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                             }
                             std::process::exit(0);
                         });
