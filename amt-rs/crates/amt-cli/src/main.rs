@@ -6,8 +6,13 @@ use clap::{Parser, Subcommand};
 use config::load;
 use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
 
+/// ver. 0.1.<commit count>, filled in by build.rs so the number always moves.
+pub const VERSION: &str = env!("AMT_VERSION");
+pub const GIT_HASH: &str = env!("AMT_GIT_HASH");
+pub const VERSION_LONG: &str = concat!(env!("AMT_VERSION"), " (", env!("AMT_GIT_HASH"), ")");
+
 #[derive(Parser)]
-#[command(name = "amt-cli", version = "0.1.0", about = "Intel AMT command‑line client")]
+#[command(name = "amt-cli", version = VERSION, long_version = VERSION_LONG, about = "Intel AMT command-line client")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -671,7 +676,7 @@ async fn kvm_capture(
                     let (rx, ry) = (be16(&hdr[0..2]), be16(&hdr[2..4]));
                     let (rw, rh) = (be16(&hdr[4..6]), be16(&hdr[6..8]));
                     let encoding = be32(&hdr[8..12]) as i32;
-                    if std::env::var("AMT_TRACE").is_ok() {
+                    if std::env::var("AMT_TRACE").ok().as_deref() == Some("2") {
                         eprintln!("rect x={rx} y={ry} w={rw} h={rh} enc={encoding}");
                     }
                     match encoding {

@@ -118,6 +118,9 @@ pub fn run_gui(gui: Gui) -> Result<()> {
     let mut window: Option<Arc<Window>> = None;
     let mut last: Option<Frame> = None;
     let mut redraws = 0u64;
+    let mut force_draw = true;
+    let mut win_w = width as u32;
+    let mut win_h = height as u32;
     // The pointer position stays put between events: a button event that sends
     // (0,0) teleports the host cursor to the top-left corner.
     let mut pos = (0u16, 0u16);
@@ -136,7 +139,11 @@ pub fn run_gui(gui: Gui) -> Result<()> {
             Event::Resumed => {
                 let win = Arc::new(
                     WindowBuilder::new()
-                        .with_title("amt-rs KVM")
+                        .with_title(format!(
+                            "amt-rs {} ({}) — KVM",
+                            crate::VERSION,
+                            crate::GIT_HASH
+                        ))
                         .with_inner_size(winit::dpi::PhysicalSize::new(
                             width as u32,
                             height as u32,
@@ -154,6 +161,8 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                 if std::env::var("AMT_TRACE").is_ok() {
                     eprintln!("[gui] window created {}x{}", width, height);
                 }
+                win_w = win.inner_size().width.max(1);
+                win_h = win.inner_size().height.max(1);
                 win.request_redraw();
                 window = Some(win);
                 _context = Some(ctx);
@@ -237,6 +246,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                     });
                 }
                 WindowEvent::RedrawRequested => {
+                    let mut dirty = false;
                     while let Ok(frame) = gui.frames.try_recv() {
                         width = frame.width;
                         height = frame.height;
@@ -245,23 +255,49 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                             *st = (frame.width, frame.height);
                         }
                         last = Some(frame);
+                        dirty = true;
+                    }
+
+                    if !dirty && !force_draw {
+                        // Nothing new: do not rescale a full frame 60 times a
+                        // second. Exposure and resizes set force_draw.
+                        return;
                     }
 
                     if let (Some(surf), Some(frame)) = (surface.as_mut(), last.as_ref()) {
-                        let w = NonZeroU32::new(width as u32).unwrap_or(NonZeroU32::new(1).unwrap());
-                        let h =
-                            NonZeroU32::new(height as u32).unwrap_or(NonZeroU32::new(1).unwrap());
-                        if surf.resize(w, h).is_ok() {
+                        let buf_w = NonZeroU32::new(win_w.max(1)).unwrap_or(NonZeroU32::new(1).unwrap());
+                        let buf_h = NonZeroU32::new(win_h.max(1)).unwrap_or(NonZeroU32::new(1).unwrap());
+                        if surf.resize(buf_w, buf_h).is_ok() {
                             if let Ok(mut buf) = surf.buffer_mut() {
-                                for (i, px) in frame.pixels.chunks_exact(4).enumerate() {
-                                    if i >= buf.len() {
-                                        break;
+                                // Scale the framebuffer to the window with the
+                                // aspect ratio kept, black bars around it.
+                                let (fw, fh) = (frame.width.max(1), frame.height.max(1));
+                                let (bw, bh) = (buf_w.get() as usize, buf_h.get() as usize);
+                                let scale = (bw as f32 / fw as f32).min(bh as f32 / fh as f32);
+                                let dw = ((fw as f32 * scale) as usize).clamp(1, bw);
+                                let dh = ((fh as f32 * scale) as usize).clamp(1, bh);
+                                let ox = (bw - dw) / 2;
+                                let oy = (bh - dh) / 2;
+
+                                let black = 0u32;
+                                for px in buf.iter_mut() {
+                                    *px = black;
+                                }
+                                for y in 0..dh {
+                                    let sy = y * fh / dh;
+                                    let row = sy * fw * 4;
+                                    let out_row = (oy + y) * bw + ox;
+                                    for x in 0..dw {
+                                        let sx = x * fw / dw;
+                                        let p = &frame.pixels[row + sx * 4..row + sx * 4 + 4];
+                                        buf[out_row + x] = ((p[0] as u32) << 16)
+                                            | ((p[1] as u32) << 8)
+                                            | p[2] as u32;
                                     }
-                                    buf[i] = ((px[0] as u32) << 16)
-                                        | ((px[1] as u32) << 8)
-                                        | px[2] as u32;
                                 }
                                 let _ = buf.present();
+                                dirty = false;
+                                force_draw = false;
                             }
                         }
                     }
@@ -270,13 +306,33 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                         redraws += 1;
                         if redraws % 30 == 0 {
                             eprintln!(
-                                "[gui] redraw {redraws}, frame {}x{}",
+                                "[gui] redraw {redraws}, frame {}x{}, window {win_w}x{win_h}, dirty {dirty}",
                                 last.as_ref().map(|f| f.width).unwrap_or(0),
                                 last.as_ref().map(|f| f.height).unwrap_or(0)
                             );
                         }
                     }
                     // The next redraw comes from the timer, not from here.
+                }
+                WindowEvent::Occluded(false) => {
+                    force_draw = true;
+                    if let Some(win) = window.as_ref() {
+                        win.request_redraw();
+                    }
+                }
+                WindowEvent::Resized(size) => {
+                    force_draw = true;
+                    win_w = size.width.max(1);
+                    win_h = size.height.max(1);
+                    if let Some(surf) = surface.as_mut() {
+                        let _ = surf.resize(
+                            NonZeroU32::new(win_w).unwrap_or(NonZeroU32::new(1).unwrap()),
+                            NonZeroU32::new(win_h).unwrap_or(NonZeroU32::new(1).unwrap()),
+                        );
+                    }
+                    if let Some(win) = window.as_ref() {
+                        win.request_redraw();
+                    }
                 }
                 _ => {}
             },
