@@ -232,6 +232,11 @@ async fn main() -> Result<()> {
                                 if let Err(e) = outcome {
                                     eprintln!("[kvm] session ended: {e}");
                                 }
+                                if link.load(Ordering::Relaxed) == 1 {
+                                    // The socket is closed: tell the control
+                                    // thread it can talk to the firmware.
+                                    link.store(2, Ordering::Relaxed);
+                                }
                                 if tokio::time::Instant::now() >= deadline {
                                     break;
                                 }
@@ -685,12 +690,40 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
         "cycle" | "powercycle" => {
             // Let go of the session first, otherwise the firmware refuses.
             link.store(1, Ordering::Relaxed);
-            println!("released the console, powering off...");
-            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            println!("releasing the console...");
+            // Wait for the socket to be closed, not for a guessed delay.
+            for _ in 0..50 {
+                if link.load(Ordering::Relaxed) == 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
             let outcome = async {
-                amt_wsman::set_power(ws, PowerState::OffHard).await?;
+                // The firmware can still report the session for a moment after
+                // the socket is gone, so a refusal is not final.
+                let mut last: Option<anyhow::Error> = None;
+                for attempt in 0..10 {
+                    match amt_wsman::set_power(ws, PowerState::OffHard).await {
+                        Ok(()) => {
+                            last = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last = Some(e);
+                            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                            if attempt == 9 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = last {
+                    return Err(e);
+                }
+                println!("powered off, waiting before power on...");
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                amt_wsman::set_power(ws, PowerState::On).await
+                amt_wsman::set_power(ws, PowerState::On).await?;
+                Ok(())
             }
             .await;
             // Whatever happened, the console must reattach: leaving the link
