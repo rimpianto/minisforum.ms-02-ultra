@@ -89,7 +89,8 @@ it and the interesting part (POST, setup) comes afterwards. The terminal that
 launched it stays usable as a small control console:
 
 ```
-commands: reset | on | off | bios | bios status | bios cancel | status | quit
+commands: status | bios | bios status | bios cancel | boot-bios
+          on | off | reset | cycle | quit
 ```
 
 Type `bios`, then `reset`, and watch the window: the session drops, comes back
@@ -128,3 +129,12 @@ depending on the host's screen state.
 
 Do not run `power --state off` or `power --state reset` on a host you care
 about: this client has no confirmation prompt.
+
+`off` deserves one more thought on a machine that is itself the site router (a
+router card inside the host): powering it off takes the LAN with it, and if the
+path you use to reach the AMT crosses that LAN, the AMT becomes unreachable and
+nothing can power the machine back on. `cycle` does not have this problem: the
+firmware performs the off/on itself, so no command has to arrive while the
+network is down. Before trusting `off` on such a host, check the route on the
+router that serves the management subnet: if it points at the card, do not.
+
