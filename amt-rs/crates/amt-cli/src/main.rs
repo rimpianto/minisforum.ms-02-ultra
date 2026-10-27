@@ -29,7 +29,9 @@ enum Commands {
         /// Save the first full frame to this PNG file instead of opening a window
         #[arg(long)]
         screenshot: Option<String>,
-        /// Send this key before capturing (space, enter, tab, escape, shift)
+        /// Key to send before capturing: a name (space, enter, tab, escape,
+        /// shift, delete, f1..f12), a single character, or a chord like
+        /// "ctrl+alt+f2". Re-sent every 1.5s, which also wakes a blank console.
         #[arg(long)]
         key: Option<String>,
         /// Send the pointer to this pixel position ("x,y") before capturing
@@ -386,7 +388,20 @@ fn keysym_for(name: &str) -> Result<u32> {
         "shift" => 0xFFE1,
         "ctrl" | "control" => 0xFFE3,
         "alt" => 0xFFE9,
+        "delete" | "del" => 0xFFFF,
+        "home" => 0xFF50,
+        "end" => 0xFF57,
+        "pageup" | "pgup" => 0xFF55,
+        "pagedown" | "pgdn" => 0xFF56,
+        "insert" | "ins" => 0xFF63,
         other if other.len() == 1 => other.as_bytes()[0] as u32,
+        // F1..F12 are 0xFFBE..0xFFC9, consecutive.
+        other if other.len() >= 2
+            && other.starts_with('f')
+            && other[1..].parse::<u32>().map(|n| (1..=12).contains(&n)).unwrap_or(false) =>
+        {
+            0xFFBE + other[1..].parse::<u32>()? - 1
+        }
         other => anyhow::bail!("unknown key '{other}'"),
     })
 }
