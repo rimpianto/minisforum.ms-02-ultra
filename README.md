@@ -210,7 +210,8 @@ not the protocol logic. What the AMT here actually accepts:
 - one-line XML, nothing before `<?xml`, Digest auth over TLS
 
 Details, build instructions and the config layout:
-[amt-rs/README.md](amt-rs/README.md).
+[amt-rs/README.md](amt-rs/README.md). What is still missing, and what "done"
+means for each piece: [amt-rs/TODO.md](amt-rs/TODO.md).
 
 ---
 

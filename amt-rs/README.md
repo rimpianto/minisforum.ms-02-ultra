@@ -157,13 +157,9 @@ enough to get `SchemaValidationError`.
 
 ## Roadmap
 
-1. Dirty-rectangle updates: today the whole frame is repainted when a new one
-   arrives.
-2. IDER (virtual CD/floppy) and USB-R: the last pieces before this replaces
-   MeshCommander for real work.
-3. SOL on hardware, once SOL/IDER is enabled in MEBx.
-4. Mouse wheel and clipboard through the KVM data channel.
-5. Windows and ARM64 builds.
+The list, with the reason each item matters and what "done" means, is in
+[TODO.md](TODO.md). In short, next is dirty-rectangle updates, then IDER, then
+the clipboard over the KVM data channel.
 
 Versions up to 1.0.0 followed the commit count (`0.1.<n>`, written into the
 manifest by `scripts/sync-version.sh`). From 1.0.0 the version is a human
