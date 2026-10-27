@@ -22,6 +22,9 @@ fn main() {
 
     println!("cargo:rustc-env=AMT_VERSION=0.1.{count}");
     println!("cargo:rustc-env=AMT_GIT_HASH={hash}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads");
+    // .git/logs/HEAD is appended on every commit and checkout, and nothing
+    // else. Watching the directory or HEAD itself either misses commits or
+    // rebuilds on unrelated activity, and every rerun of this script forces a
+    // rebuild of the crate.
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
 }
