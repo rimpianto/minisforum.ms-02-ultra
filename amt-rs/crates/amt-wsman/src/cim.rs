@@ -9,6 +9,8 @@ pub enum PowerState {
     PowerCycle = 5,
     OffHard = 6,
     Hibernate = 7,
+    /// Power down. 8 is what the firmware accepts (6 is refused as invalid).
+    Off = 8,
     Reset = 10,
     // ... other states as needed
 }
@@ -17,7 +19,7 @@ impl PowerState {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "on" => Some(PowerState::On),
-            "off" => Some(PowerState::OffHard),
+            "off" => Some(PowerState::Off),
             "reset" => Some(PowerState::Reset),
             _ => None,
         }

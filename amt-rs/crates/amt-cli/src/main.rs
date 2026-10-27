@@ -668,7 +668,7 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
             println!("power on requested");
         }
         "off" => {
-            amt_wsman::set_power(ws, PowerState::OffHard).await?;
+            amt_wsman::set_power(ws, PowerState::Off).await?;
             println!("power off requested (close the KVM window first if it is refused)");
         }
         "status" => {
@@ -702,7 +702,7 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
                 // The firmware can still report the session for a moment after
                 // the socket is gone, so a refusal is not final.
                 let mut last: Option<anyhow::Error> = None;
-                for attempt in 0..10 {
+                for attempt in 0..4 {
                     match amt_wsman::set_power(ws, PowerState::OffHard).await {
                         Ok(()) => {
                             last = None;
@@ -711,7 +711,7 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
                         Err(e) => {
                             last = Some(e);
                             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-                            if attempt == 9 {
+                            if attempt == 3 {
                                 break;
                             }
                         }
