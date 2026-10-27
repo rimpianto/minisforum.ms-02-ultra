@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
                                 println!("  bios status  is a setup boot pending?");
                                 println!("  bios cancel  clear the request");
                                 println!("  boot-bios    request it and reset now");
-                                println!("  on/off/reset  power actions (off and power cycle need the console released)");
+                                println!("  on/off/reset  power actions (off and cycle release the console themselves)");
                                 println!("  cycle         release the console, power off, power on, reattach");
                                 println!("  quit         leave the session and close the window");
                             } else {
@@ -668,8 +668,37 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
             println!("power on requested");
         }
         "off" => {
-            amt_wsman::set_power(ws, PowerState::Off).await?;
-            println!("power off requested (close the KVM window first if it is refused)");
+            // Same rule as cycle: the firmware refuses to power off while a
+            // client is attached, so let go of the session first. The console
+            // reattaches by itself once the machine is back.
+            link.store(1, Ordering::Relaxed);
+            println!("releasing the console...");
+            for _ in 0..50 {
+                if link.load(Ordering::Relaxed) == 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let mut last_err = None;
+            for attempt in 0..4 {
+                match amt_wsman::set_power(ws, PowerState::Off).await {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        }
+                    }
+                }
+            }
+            link.store(0, Ordering::Relaxed);
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+            println!("powered off - the console reattaches when the machine is on again");
         }
         "status" => {
             let (p, r) = amt_wsman::get_power_state(ws).await?;
