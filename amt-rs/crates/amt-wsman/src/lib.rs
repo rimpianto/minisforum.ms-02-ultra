@@ -137,7 +137,7 @@ pub async fn set_power(cfg: &AmtConfig, state: PowerState) -> Result<()> {
 }
 
 /// Retrieve current PowerState and RequestedPowerState via a WS‑Man GET request.
-pub async fn get_power_state(cfg: &AmtConfig) -> Result<(u8, u8)> {
+pub async fn get_power_state(cfg: &AmtConfig) -> Result<(u8, Option<u8>)> {
     // Build URL.
     let url = format!("https://{}:{}/wsman", cfg.host, cfg.port);
     let url = Url::parse(&url).context("Invalid WS‑Man URL")?;
@@ -215,7 +215,7 @@ pub async fn get_power_state(cfg: &AmtConfig) -> Result<(u8, u8)> {
 }
 
 // Helper to extract PowerState and RequestedPowerState from a WS‑Man response body.
-fn parse_power_response(body: &str) -> Result<(u8, u8)> {
+fn parse_power_response(body: &str) -> Result<(u8, Option<u8>)> {
     let power_state = {
         let start = body.find("<g:PowerState>");
         let end = body.find("</g:PowerState>");
@@ -228,16 +228,18 @@ fn parse_power_response(body: &str) -> Result<(u8, u8)> {
             0
         }
     };
+    // Not every firmware reports this attribute: the MS-02 answers with
+    // PowerState only, so "absent" must not be printed as if the machine had
+    // asked for state 0.
     let requested = {
         let start = body.find("<g:RequestedPowerState>");
         let end = body.find("</g:RequestedPowerState>");
-        if let (Some(s), Some(e)) = (start, end) {
-            body[s + "<g:RequestedPowerState>".len()..e]
+        match (start, end) {
+            (Some(s), Some(e)) => body[s + "<g:RequestedPowerState>".len()..e]
                 .trim()
                 .parse::<u8>()
-                .unwrap_or(0)
-        } else {
-            0
+                .ok(),
+            _ => None,
         }
     };
     Ok((power_state, requested))

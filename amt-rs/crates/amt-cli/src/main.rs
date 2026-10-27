@@ -324,13 +324,22 @@ async fn main() -> Result<()> {
                 // CIM_AssociatedPowerManagementService.
                 None => {
                     let (ps, rps) = amt_wsman::get_power_state(&ws_cfg).await?;
-                    println!(
-                        "PowerState={} ({}) RequestedPowerState={} ({})",
-                        ps,
-                        state_name(ps),
-                        rps,
-                        state_name(rps)
-                    );
+                    match rps {
+                        Some(rps) => println!(
+                            "PowerState={} ({}) RequestedPowerState={} ({})",
+                            ps,
+                            state_name(ps),
+                            rps,
+                            state_name(rps)
+                        ),
+                        // Some firmware (the MS-02 does) omits the attribute
+                        // entirely: say so instead of inventing a "0 (Unknown)".
+                        None => println!(
+                            "PowerState={} ({}) RequestedPowerState not reported by this firmware",
+                            ps,
+                            state_name(ps)
+                        ),
+                    }
                 }
                 Some(requested) => {
                     let power_state = PowerState::from_str(requested).ok_or_else(|| {
@@ -1150,11 +1159,17 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
         }
         "status" => {
             let (p, r) = amt_wsman::get_power_state(ws).await?;
-            println!(
-                "PowerState={} RequestedPowerState={}",
-                paint_state(p),
-                paint_state(r)
-            );
+            match r {
+                Some(r) => println!(
+                    "PowerState={} RequestedPowerState={}",
+                    paint_state(p),
+                    paint_state(r)
+                ),
+                None => println!(
+                    "PowerState={} RequestedPowerState not reported by this firmware",
+                    paint_state(p)
+                ),
+            }
         }
         "bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
