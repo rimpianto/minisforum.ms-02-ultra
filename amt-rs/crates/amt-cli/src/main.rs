@@ -423,10 +423,9 @@ async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
     let mut msg = vec![4u8, 1, 0, 0];
     msg.extend_from_slice(&keysym.to_be_bytes());
     session.write_raw(&msg).await?;
-    // A real keyboard holds a key for tens of milliseconds; sending down and
-    // up in the same instant is what a client does and what the firmware may
-    // drop.
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    // Short but non-zero: zero is dropped by some firmware, and anything near
+    // the host's key-repeat delay turns one press into a burst.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let mut msg = vec![4u8, 0, 0, 0];
     msg.extend_from_slice(&keysym.to_be_bytes());
     session.write_raw(&msg).await?;
@@ -616,10 +615,14 @@ async fn kvm_capture(
         if let Some((_, input_rx)) = window.as_ref() {
             while let Ok(ev) = input_rx.try_recv() {
                 match ev {
+                    // A keystroke is sent whole the moment the key goes down.
+                    // Waiting for the release to send the key-up means the
+                    // host holds the key while we decode a frame, and the
+                    // console repeats it (spaces everywhere, doubled letters).
                     gui::Input::Key { keysym, down } => {
-                        let mut msg = vec![4u8, down as u8, 0, 0];
-                        msg.extend_from_slice(&keysym.to_be_bytes());
-                        session.write_raw(&msg).await?;
+                        if down {
+                            send_key(session, keysym).await?;
+                        }
                     }
                     gui::Input::Pointer { x, y, buttons } => {
                         send_pointer(session, x, y, buttons).await?;
@@ -636,7 +639,7 @@ async fn kvm_capture(
             }
         }
         let msg_type = match tokio::time::timeout(
-            std::time::Duration::from_millis(120),
+            std::time::Duration::from_millis(30),
             session.read_raw(1),
         )
         .await
