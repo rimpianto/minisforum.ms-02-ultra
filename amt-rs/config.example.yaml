@@ -23,6 +23,9 @@ machines:
     # Where the redirection service (KVM, SOL) listens. The firmware puts it
     # two ports above WS-Man, which is what happens when this is omitted.
     redirection_port: 16995
+    # Optional: the MAC of the management interface. Nothing on the wire uses
+    # it, it is here to tell two machines apart in a lease table.
+    mac: 38:05:25:35:42:A5
 
 # The older single-machine form still loads, so a config written before
 # multiple machines existed keeps working:

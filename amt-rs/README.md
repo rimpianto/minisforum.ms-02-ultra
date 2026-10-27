@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.1.1** — everything below was exercised against the AMT of this host
+**1.1.2** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
@@ -145,6 +145,9 @@ machines:
     password: CHANGE_ME
     redirection_port: 16995   # optional; port + 2 when omitted
 ```
+
+`mac:` is optional and never used on the wire: it is there so `machines`
+output can be matched against a DHCP lease table.
 
 ```sh
 ./target/release/amt-cli machines             # what is configured, * = default

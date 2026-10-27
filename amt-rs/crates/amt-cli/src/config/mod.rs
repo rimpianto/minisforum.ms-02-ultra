@@ -93,6 +93,10 @@ pub struct AmtConfig {
     /// (16993 -> 16995), which is what an omitted value means.
     #[serde(default)]
     pub redirection_port: Option<u16>,
+    /// MAC of the management interface, if you know it. Not used on the wire:
+    /// it is there to tell two machines apart in a lease table.
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -111,6 +115,7 @@ impl Default for AmtConfig {
             username: default_user(),
             password: String::new(),
             redirection_port: None,
+            mac: None,
         }
     }
 }

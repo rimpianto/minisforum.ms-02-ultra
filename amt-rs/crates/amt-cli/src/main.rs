@@ -218,7 +218,7 @@ fn print_machines(cfg: &config::Config, requested: Option<&str>) -> Result<()> {
     for m in &all {
         let mark = if m.name == current { "*" } else { " " };
         println!(
-            "{} {:<width$}  {}:{}  wsman {}  redirection {}  user {}",
+            "{} {:<width$}  {}:{}  wsman {}  redirection {}  user {}{}",
             mark,
             m.name,
             m.amt.host,
@@ -226,6 +226,10 @@ fn print_machines(cfg: &config::Config, requested: Option<&str>) -> Result<()> {
             m.amt.port,
             m.amt.redirection_port(),
             m.amt.username,
+            match m.amt.mac.as_deref() {
+                Some(mac) => format!("  mac {mac}"),
+                None => String::new(),
+            },
             width = width
         );
     }
