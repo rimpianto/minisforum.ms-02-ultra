@@ -125,6 +125,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
     // (0,0) teleports the host cursor to the top-left corner.
     let mut pos = (0u16, 0u16);
     let mut held_mods: Vec<u32> = Vec::new();
+    let mut fb_dims = (0usize, 0usize);
     let mut mask = 0u8;
 
     event_loop.run(move |event, elwt| {
@@ -275,6 +276,29 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                 WindowEvent::RedrawRequested => {
                     let mut dirty = false;
                     while let Ok(frame) = gui.frames.try_recv() {
+                        if (frame.width, frame.height) != fb_dims {
+                            // POST and the BIOS run at a different resolution:
+                            // follow it instead of scaling a small screen up
+                            // into a big window.
+                            fb_dims = (frame.width, frame.height);
+                            if let Some(win) = window.as_ref() {
+                                if let Some(mon) = win.current_monitor() {
+                                    let (mw, mh) = (mon.size().width as f64, mon.size().height as f64);
+                                    // Small framebuffers (POST, BIOS) get
+                                    // enlarged up to 2x: chunky but readable.
+                                    let factor = (mw * 0.92 / frame.width as f64)
+                                        .min(mh * 0.92 / frame.height as f64)
+                                        .min(2.0);
+                                    let _ = win.request_inner_size(
+                                        winit::dpi::PhysicalSize::new(
+                                            (frame.width as f64 * factor) as u32,
+                                            (frame.height as f64 * factor) as u32,
+                                        ),
+                                    );
+                                }
+                                win.request_redraw();
+                            }
+                        }
                         width = frame.width;
                         height = frame.height;
                         {
