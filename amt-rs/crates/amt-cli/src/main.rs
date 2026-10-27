@@ -230,7 +230,7 @@ async fn main() -> Result<()> {
                 println!("when you are ready: amt-cli power --state reset");
             }
         }
-        Commands::Replay { .. } => unreachable!("replay gestito prima della config"),
+        Commands::Replay { .. } => unreachable!("replay is handled before the config"),
         Commands::Kvm { seconds, screenshot, key, pointer, click } => {
             // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
             // without TLS it is WS-Man + 2 as well (16992 -> 16994).

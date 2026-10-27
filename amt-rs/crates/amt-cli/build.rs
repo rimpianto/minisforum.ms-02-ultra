@@ -1,10 +1,10 @@
 use std::process::Command;
 
 fn main() {
-    // La versione viene dal manifest (Cargo.toml), che scripts/sync-version.sh
-    // tiene allineato al numero di commit: cosi' quello che stampa cargo e'
-    // quello che stampa il programma. Qui resta solo l'hash, che cambia a ogni
-    // commit e serve a riconoscere il binario in prova.
+    // The version comes from the manifest (Cargo.toml), kept in step with the
+    // commit count by scripts/sync-version.sh: what cargo prints is therefore
+    // what the program prints. Only the hash is built here, because it changes
+    // on every commit and identifies the binary under test.
     let hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -14,6 +14,6 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=AMT_GIT_HASH={hash}");
-    // Solo i commit e i checkout toccano questo file.
+    // Only commits and checkouts touch this file.
     println!("cargo:rerun-if-changed=../../../.git/logs/HEAD");
 }

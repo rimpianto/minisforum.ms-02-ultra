@@ -1,7 +1,7 @@
-# Copia in ~/.amt/config.yaml (chmod 600).
-# Nessuna credenziale va committata.
+# Copy to ~/.amt/config.yaml and chmod 600.
+# No credentials are ever committed.
 amt:
-  host: 192.168.99.153   # AMT del Minisforum MS-02 Ultra
-  port: 16993            # WS-Man over TLS; la 16992 e chiusa su questo firmware
+  host: 192.168.99.153   # AMT of the Minisforum MS-02 Ultra
+  port: 16993            # WS-Man over TLS; 16992 is closed on this firmware
   username: admin
   password: CHANGE_ME
