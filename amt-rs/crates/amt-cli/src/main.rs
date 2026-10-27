@@ -191,9 +191,19 @@ impl Target {
 /// `amt-cli machines`: what is configured, which one a bare command would use,
 /// and where it listens. No passwords, no key material.
 fn print_machines(cfg: &config::Config, requested: Option<&str>) -> Result<()> {
+    match config::config_path() {
+        Some(p) => println!("{}", dim(&format!("config: {}", p.display()))),
+        None => println!("{}", dim("config: none found")),
+    }
     let all = cfg.list();
     if all.is_empty() {
-        println!("no machines configured in ~/.amt/config.yaml");
+        println!(
+            "no machines configured; create {}",
+            config::candidates()
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        );
         return Ok(());
     }
 
@@ -538,10 +548,9 @@ async fn main() -> Result<()> {
                                     return;
                                 }
                             };
-                            let hist = format!(
-                                "{}/.amt/history",
-                                std::env::var("HOME").unwrap_or_else(|_| ".".into())
-                            );
+                            // History sits beside the config file, wherever that
+                            // was found (XDG location or the old ~/.amt).
+                            let hist = config::history_path().to_string_lossy().to_string();
                             let _ = rl.load_history(&hist);
                             loop {
                                 let prompt = if many {

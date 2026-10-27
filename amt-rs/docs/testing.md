@@ -14,8 +14,9 @@ The binary is `target/release/amt-cli`.
 
 ## 2. Point it at the device
 
-Either a config file at `~/.amt/config.yaml`, which can hold several machines
-(one is used at a time):
+Either a config file at `~/.config/amt/config.yaml` (or `$XDG_CONFIG_HOME/amt/config.yaml`;
+`~/.amt/config.yaml` still works, and `AMT_CONFIG` points anywhere), which can
+hold several machines (one is used at a time):
 
 ```yaml
 default: ms02

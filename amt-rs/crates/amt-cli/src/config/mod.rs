@@ -2,9 +2,71 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
 
-/// `~/.amt/config.yaml` holds any number of machines plus an optional default.
-/// The old single-machine form (`amt: { host: ... }`) still loads, so a config
+/// Where the config is looked for, in order: `AMT_CONFIG`, then the XDG
+/// location (`$XDG_CONFIG_HOME/amt/config.yaml`, usually
+/// `~/.config/amt/config.yaml`), then the place this tool used first
+/// (`~/.amt/config.yaml`), which still works so nobody has to move a file.
+pub fn candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(explicit) = std::env::var("AMT_CONFIG") {
+        if !explicit.is_empty() {
+            out.push(PathBuf::from(explicit));
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            out.push(PathBuf::from(xdg).join("amt/config.yaml"));
+        }
+    }
+    if let Some(home) = home() {
+        out.push(home.join(".config/amt/config.yaml"));
+        out.push(home.join(".amt/config.yaml"));
+    }
+    out
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// The config file in use, if there is one.
+pub fn config_path() -> Option<PathBuf> {
+    candidates().into_iter().find(|p| p.is_file())
+}
+
+/// Directory that holds the config (or would hold it): history sits next to
+/// the file it belongs to.
+pub fn config_dir() -> PathBuf {
+    if let Some(p) = config_path() {
+        if let Some(dir) = p.parent() {
+            return dir.to_path_buf();
+        }
+    }
+    candidates()
+        .into_iter()
+        .next()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where `use <name>` keeps its command history: beside the config file.
+pub fn history_path() -> PathBuf {
+    config_dir().join("history")
+}
+
+/// Human-readable list of the places we look, for error messages.
+fn where_we_look() -> String {
+    candidates()
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// The config file holds any number of machines plus an optional default. The
+/// old single-machine form (`amt: { host: ... }`) still loads, so a config
 /// written before this change keeps working.
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
@@ -104,7 +166,10 @@ impl Config {
                     },
                 });
             }
-            bail!("no AMT machine configured: create ~/.amt/config.yaml (see config.example.yaml) or set AMT_HOST");
+            bail!(
+                "no AMT machine configured: create {} (see config.example.yaml) or set AMT_HOST",
+                where_we_look()
+            );
         }
 
         let want = requested
@@ -132,13 +197,14 @@ impl Config {
 /// Read the config file. Environment overrides are applied later, on the
 /// machine that was actually chosen.
 pub fn load() -> Result<Config> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let path = format!("{}/.amt/config.yaml", home);
-
-    match fs::read_to_string(&path) {
-        Ok(contents) => serde_yaml::from_str::<Config>(&contents)
-            .with_context(|| format!("Failed to parse {}", path)),
-        Err(_) => Ok(Config::default()),
+    match config_path() {
+        Some(path) => {
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            serde_yaml::from_str::<Config>(&contents)
+                .with_context(|| format!("Failed to parse {}", path.display()))
+        }
+        None => Ok(Config::default()),
     }
 }
 
@@ -163,14 +229,20 @@ pub fn with_env_overrides(mut machine: Machine) -> Result<Machine> {
 
     if machine.amt.host.is_empty() {
         bail!(
-            "no AMT host for '{}': set AMT_HOST or fill it in ~/.amt/config.yaml",
-            machine.name
+            "no AMT host for '{}': set AMT_HOST or fill it in {}",
+            machine.name,
+            config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(where_we_look)
         );
     }
     if machine.amt.password.is_empty() {
         bail!(
-            "no AMT password for '{}': set AMT_PASS or fill it in ~/.amt/config.yaml",
-            machine.name
+            "no AMT password for '{}': set AMT_PASS or fill it in {}",
+            machine.name,
+            config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(where_we_look)
         );
     }
     Ok(machine)

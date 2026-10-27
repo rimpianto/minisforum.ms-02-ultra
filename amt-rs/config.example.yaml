@@ -1,4 +1,6 @@
-# Copy to ~/.amt/config.yaml and chmod 600.
+# Copy to ~/.config/amt/config.yaml (or $XDG_CONFIG_HOME/amt/config.yaml,
+# or anywhere with AMT_CONFIG=/path/to/config.yaml) and chmod 600.
+# ~/.amt/config.yaml is still read, for configs written before the move.
 # No credentials are ever committed.
 #
 # Any number of machines, one used at a time. `default:` is what a bare

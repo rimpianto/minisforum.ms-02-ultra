@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.1.0** — everything below was exercised against the AMT of this host
+**1.1.1** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
@@ -125,9 +125,10 @@ Redirection listens two ports above WS-Man: **16993 → 16995** with TLS
 
 ## Configuration
 
-`~/.amt/config.yaml`, mode `0600`, never committed (see
-`config.example.yaml` and `.gitignore`). As many machines as you like, one at
-a time:
+`~/.config/amt/config.yaml` (or `$XDG_CONFIG_HOME/amt/config.yaml`), mode
+`0600`, never committed (see `config.example.yaml` and `.gitignore`). The old
+location `~/.amt/config.yaml` is still read, and `AMT_CONFIG=/path/file.yaml`
+overrides both. As many machines as you like, one at a time:
 
 ```yaml
 default: ms02                 # what a bare command talks to
