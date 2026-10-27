@@ -2,6 +2,8 @@ mod config;
 mod gui;
 
 use anyhow::Result;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use config::load;
 use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
@@ -184,6 +186,8 @@ async fn main() -> Result<()> {
                 let user = cfg.amt.username.clone();
                 let pass = cfg.amt.password.clone();
                 let input_rx = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
+                // 0 = attached, 1 = release the session (power cycle in progress)
+                let link = Arc::new(AtomicU8::new(0));
 
                 // Session thread: reconnects by itself, because a power reset
                 // kills it and the interesting part (POST, BIOS) comes after.
@@ -191,6 +195,7 @@ async fn main() -> Result<()> {
                     let frame_tx = frame_tx.clone();
                     let input_rx = input_rx.clone();
                     let key = key.clone();
+                    let link = link.clone();
                     std::thread::spawn(move || {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
@@ -219,6 +224,7 @@ async fn main() -> Result<()> {
                                     first && click,
                                     Some((frame_tx.clone(), input_rx.clone())),
                                     None,
+                                    Some(link.clone()),
                                 )
                                 .await;
                                 first = false;
@@ -253,11 +259,12 @@ async fn main() -> Result<()> {
                             Err(_) => return,
                         };
                         let tty = std::io::stdin().is_terminal();
+                        let link = link.clone();
                         if tty {
                             println!();
                             println!("amt-rs {} - KVM window is live", VERSION);
                             println!("  status | bios | bios status | bios cancel | boot-bios");
-                            println!("  on | off | reset | quit          (help for this list)");
+                            println!("  on | off | reset | cycle | quit  (help for this list)");
                             print!("amt-rs> ");
                             let _ = std::io::stdout().flush();
                         }
@@ -284,11 +291,12 @@ async fn main() -> Result<()> {
                                 println!("  bios status  is a setup boot pending?");
                                 println!("  bios cancel  clear the request");
                                 println!("  boot-bios    request it and reset now");
-                                println!("  on/off/reset power actions (off and power cycle need the window closed)");
+                                println!("  on/off/reset  power actions (off and power cycle need the console released)");
+                                println!("  cycle         release the console, power off, power on, reattach");
                                 println!("  quit         leave the session and close the window");
                             } else {
                                 rt.block_on(async {
-                                    if let Err(e) = run_control(&cmd, &ws_cfg).await {
+                                    if let Err(e) = run_control(&cmd, &ws_cfg, &link).await {
                                         println!("error: {e}");
                                     }
                                 });
@@ -316,6 +324,7 @@ async fn main() -> Result<()> {
                 click,
                 None,
                 screenshot,
+                None,
             )
             .await?;
         }
@@ -642,7 +651,7 @@ fn replay_tiles(dir: &str, out: &str, width: usize, height: usize) -> Result<()>
 }
 
 
-async fn run_control(cmd: &str, ws: &WsmanConfig) -> Result<()> {
+async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()> {
     match cmd {
         "reset" => {
             amt_wsman::set_power(ws, PowerState::Reset).await?;
@@ -672,6 +681,23 @@ async fn run_control(cmd: &str, ws: &WsmanConfig) -> Result<()> {
             amt_wsman::set_bios_setup(ws, false).await?;
             println!("BIOS setup request cleared");
         }
+        "cycle" | "powercycle" => {
+            // Let go of the session first, otherwise the firmware refuses.
+            link.store(1, Ordering::Relaxed);
+            println!("released the console, powering off...");
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            let outcome = async {
+                amt_wsman::set_power(ws, PowerState::OffHard).await?;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                amt_wsman::set_power(ws, PowerState::On).await
+            }
+            .await;
+            // Whatever happened, the console must reattach: leaving the link
+            // latched would leave a window that never comes back.
+            link.store(0, Ordering::Relaxed);
+            outcome?;
+            println!("power on sent - reattaching the console");
+        }
         "boot-bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
             amt_wsman::set_power(ws, PowerState::Reset).await?;
@@ -696,6 +722,7 @@ async fn run_kvm_session(
         std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<gui::Input>>>,
     )>,
     screenshot: Option<String>,
+    link: Option<Arc<AtomicU8>>,
 ) -> Result<()> {
     eprintln!("[kvm] connecting to {host}:{redir_port}");
     // Plain TCP probe first: if this fails the trouble is not TLS.
@@ -720,7 +747,7 @@ async fn run_kvm_session(
     eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
-    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, pointer, click, window).await
+    kvm_capture(&mut session, bpp, fb, seconds, screenshot.as_deref(), key, pointer, click, window, link).await
 }
 
 async fn kvm_capture(
@@ -736,6 +763,7 @@ async fn kvm_capture(
         std::sync::mpsc::Sender<gui::Frame>,
         std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<gui::Input>>>,
     )>,
+    link: Option<Arc<AtomicU8>>,
 ) -> Result<()> {
     // RGB565 is the device default; the reference only sends SetPixelFormat
     // when it wants 8 bpp. Sending it unconditionally is a byte the firmware
@@ -790,6 +818,16 @@ async fn kvm_capture(
     let mut updates = 0usize;
     let quiet = window.is_some();
     while tokio::time::Instant::now() < deadline {
+        // A control command can ask the session to let go: the firmware
+        // refuses power off and power cycle while a redirection client is
+        // attached, so the only way to cycle the machine and still see the
+        // boot is to disconnect on purpose and reconnect afterwards.
+        if let Some(link) = link.as_ref() {
+            if link.load(Ordering::Relaxed) == 1 {
+                eprintln!("[kvm] releasing the session for a power cycle");
+                return Ok(());
+            }
+        }
         // Input first: a static screen sends no framebuffer updates at all, so
         // draining input only when a frame arrives makes the keyboard and mouse
         // dead exactly when the console is idle.
