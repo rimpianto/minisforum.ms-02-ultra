@@ -82,6 +82,19 @@ it once it has been used, so it cannot get stuck. `--reset` while a KVM session
 is open is fine: the AMT rejects power off and power cycle during redirection,
 but a reset goes through, and the session stays attached so you see POST.
 
+## 5c. Drive the machine from the terminal, watch it in the window
+
+With the window open the session reconnects by itself, because a reset kills
+it and the interesting part (POST, setup) comes afterwards. The terminal that
+launched it stays usable as a small control console:
+
+```
+commands: reset | on | off | bios | bios status | bios cancel | status | quit
+```
+
+Type `bios`, then `reset`, and watch the window: the session drops, comes back
+by itself, and you are looking at the firmware. No Delete-key reflexes.
+
 ## 6. The window
 
 ```

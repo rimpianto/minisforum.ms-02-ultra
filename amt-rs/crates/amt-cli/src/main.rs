@@ -183,34 +183,99 @@ async fn main() -> Result<()> {
                 let host = cfg.amt.host.clone();
                 let user = cfg.amt.username.clone();
                 let pass = cfg.amt.password.clone();
-                std::thread::spawn(move || {
-                    let rt = match tokio::runtime::Runtime::new() {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            eprintln!("tokio runtime: {e}");
-                            std::process::exit(1);
-                        }
+                let input_rx = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
+
+                // Session thread: reconnects by itself, because a power reset
+                // kills it and the interesting part (POST, BIOS) comes after.
+                {
+                    let frame_tx = frame_tx.clone();
+                    let input_rx = input_rx.clone();
+                    let key = key.clone();
+                    std::thread::spawn(move || {
+                        let rt = match tokio::runtime::Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(e) => {
+                                eprintln!("tokio runtime: {e}");
+                                std::process::exit(1);
+                            }
+                        };
+                        rt.block_on(async move {
+                            let deadline = tokio::time::Instant::now()
+                                + std::time::Duration::from_secs(seconds);
+                            let mut first = true;
+                            loop {
+                                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                                if left.is_zero() {
+                                    break;
+                                }
+                                let outcome = run_kvm_session(
+                                    &host,
+                                    redir_port,
+                                    &user,
+                                    &pass,
+                                    left.as_secs().max(1),
+                                    if first { key.clone() } else { None },
+                                    if first { pointer_xy } else { None },
+                                    first && click,
+                                    Some((frame_tx.clone(), input_rx.clone())),
+                                    None,
+                                )
+                                .await;
+                                first = false;
+                                if let Err(e) = outcome {
+                                    eprintln!("[kvm] session ended: {e}");
+                                }
+                                if tokio::time::Instant::now() >= deadline {
+                                    break;
+                                }
+                                eprintln!("[kvm] reconnecting in 2s...");
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                            std::process::exit(0);
+                        });
+                    });
+                }
+
+                // Control thread: the terminal stays usable while the window
+                // shows the console, so power actions and their effects are one
+                // line apart.
+                {
+                    let ws_cfg = WsmanConfig {
+                        host: cfg.amt.host.clone(),
+                        port: cfg.amt.port,
+                        username: cfg.amt.username.clone(),
+                        password: cfg.amt.password.clone(),
                     };
-                    rt.block_on(async move {
-                        if let Err(e) = run_kvm_session(
-                            &host,
-                            redir_port,
-                            &user,
-                            &pass,
-                            seconds,
-                            key.clone(),
-                            pointer_xy,
-                            click,
-                            Some((frame_tx, input_rx)),
-                            None,
-                        )
-                        .await
-                        {
-                            eprintln!("kvm: {e}");
+                    std::thread::spawn(move || {
+                        let rt = match tokio::runtime::Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(_) => return,
+                        };
+                        println!(
+                            "commands: reset | on | off | bios | bios status | bios cancel | status | quit"
+                        );
+                        let stdin = std::io::stdin();
+                        for line in std::io::BufRead::lines(stdin.lock()) {
+                            let line = match line {
+                                Ok(l) => l,
+                                Err(_) => break,
+                            };
+                            let cmd = line.trim().to_ascii_lowercase();
+                            if cmd.is_empty() {
+                                continue;
+                            }
+                            if cmd == "quit" || cmd == "q" {
+                                std::process::exit(0);
+                            }
+                            rt.block_on(async {
+                                if let Err(e) = run_control(&cmd, &ws_cfg).await {
+                                    println!("error: {e}");
+                                }
+                            });
                         }
                     });
-                    std::process::exit(0);
-                });
+                }
+
                 gui::run_gui(gui)?;
                 return Ok(());
             }
@@ -552,6 +617,41 @@ fn replay_tiles(dir: &str, out: &str, width: usize, height: usize) -> Result<()>
 }
 
 
+async fn run_control(cmd: &str, ws: &WsmanConfig) -> Result<()> {
+    match cmd {
+        "reset" => {
+            amt_wsman::set_power(ws, PowerState::Reset).await?;
+            println!("reset requested");
+        }
+        "on" => {
+            amt_wsman::set_power(ws, PowerState::On).await?;
+            println!("power on requested");
+        }
+        "off" => {
+            amt_wsman::set_power(ws, PowerState::OffHard).await?;
+            println!("power off requested (close the KVM window first if it is refused)");
+        }
+        "status" => {
+            let (p, r) = amt_wsman::get_power_state(ws).await?;
+            println!("PowerState={p} RequestedPowerState={r}");
+        }
+        "bios" => {
+            amt_wsman::set_bios_setup(ws, true).await?;
+            println!("BIOS setup requested for the next boot");
+        }
+        "bios status" => {
+            let pending = amt_wsman::bios_boot_pending(ws).await?;
+            println!("BIOSSetup pending: {}", if pending { "yes" } else { "no" });
+        }
+        "bios cancel" => {
+            amt_wsman::set_bios_setup(ws, false).await?;
+            println!("BIOS setup request cleared");
+        }
+        other => println!("unknown command '{other}'"),
+    }
+    Ok(())
+}
+
 async fn run_kvm_session(
     host: &str,
     redir_port: u16,
@@ -561,7 +661,10 @@ async fn run_kvm_session(
     key: Option<String>,
     pointer: Option<(u16, u16)>,
     click: bool,
-    window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
+    window: Option<(
+        std::sync::mpsc::Sender<gui::Frame>,
+        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<gui::Input>>>,
+    )>,
     screenshot: Option<String>,
 ) -> Result<()> {
     eprintln!("[kvm] connecting to {host}:{redir_port}");
@@ -599,7 +702,10 @@ async fn kvm_capture(
     key: Option<String>,
     pointer: Option<(u16, u16)>,
     click: bool,
-    window: Option<(std::sync::mpsc::Sender<gui::Frame>, std::sync::mpsc::Receiver<gui::Input>)>,
+    window: Option<(
+        std::sync::mpsc::Sender<gui::Frame>,
+        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<gui::Input>>>,
+    )>,
 ) -> Result<()> {
     // RGB565 is the device default; the reference only sends SetPixelFormat
     // when it wants 8 bpp. Sending it unconditionally is a byte the firmware
@@ -658,7 +764,13 @@ async fn kvm_capture(
         // draining input only when a frame arrives makes the keyboard and mouse
         // dead exactly when the console is idle.
         if let Some((_, input_rx)) = window.as_ref() {
-            while let Ok(ev) = input_rx.try_recv() {
+            let mut pending = Vec::new();
+            if let Ok(rx) = input_rx.lock() {
+                while let Ok(ev) = rx.try_recv() {
+                    pending.push(ev);
+                }
+            }
+            for ev in pending {
                 match ev {
                     // A keystroke is sent whole the moment the key goes down.
                     // Waiting for the release to send the key-up means the

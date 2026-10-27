@@ -178,6 +178,48 @@ pub async fn set_bios_setup(cfg: &AmtConfig, enable: bool) -> Result<()> {
     if std::env::var("AMT_DEBUG_XML").is_ok() {
         eprintln!("--- PUT REPLY ---\n{reply}\n--- END ---");
     }
+
+    // Writing the instance is not enough: the boot configuration has to be
+    // marked as the one to use for the next boot, otherwise the firmware
+    // ignores everything in it. MeshCommander does the same.
+    if enable {
+        activate_boot_config(cfg).await?;
+    }
+    Ok(())
+}
+
+const NS_CIM: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2";
+
+/// SetBootConfigRole(BootConfigSetting -> Intel(r) AMT: Boot Configuration 0, 1)
+async fn activate_boot_config(cfg: &AmtConfig) -> Result<()> {
+    let selectors = concat!(
+        r#"<w:Selector Name="CreationClassName">CIM_BootService</w:Selector>"#,
+        r#"<w:Selector Name="Name">Intel(r) AMT Boot Service</w:Selector>"#,
+        r#"<w:Selector Name="SystemCreationClassName">CIM_ComputerSystem</w:Selector>"#,
+        r#"<w:Selector Name="SystemName">Intel(r) AMT</w:Selector>"#
+    );
+
+    let body = format!(
+        r#"<p:SetBootConfigRole_INPUT xmlns:p="{NS_CIM}/CIM_BootService"><p:BootConfigSetting><a:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address><a:ReferenceParameters><w:ResourceURI>{NS_CIM}/CIM_BootConfigSetting</w:ResourceURI><w:SelectorSet><w:Selector Name="InstanceID">Intel(r) AMT: Boot Configuration 0</w:Selector></w:SelectorSet></a:ReferenceParameters></p:BootConfigSetting><p:Role>1</p:Role></p:SetBootConfigRole_INPUT>"#
+    );
+
+    let reply = call(
+        cfg,
+        &format!("{NS_CIM}/CIM_BootService/SetBootConfigRole"),
+        &format!("{NS_CIM}/CIM_BootService"),
+        selectors,
+        &body,
+    )
+    .await?;
+
+    if std::env::var("AMT_DEBUG_XML").is_ok() {
+        eprintln!("--- SetBootConfigRole REPLY ---\n{reply}\n--- END ---");
+    }
+    if let Some(v) = field(&reply, "ReturnValue") {
+        if v != "0" {
+            return Err(anyhow!("SetBootConfigRole returned {v}"));
+        }
+    }
     Ok(())
 }
 
@@ -229,10 +271,11 @@ fn element_name(element: &str) -> String {
         .to_string()
 }
 
+/// Value of an element regardless of the namespace prefix the device used:
+/// the same reply mixes g:, p: and c: prefixes.
 fn field(xml: &str, name: &str) -> Option<String> {
-    let open = format!("<g:{name}>");
-    let close = format!("</g:{name}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
+    let needle = format!(":{name}>");
+    let start = xml.find(&needle)? + needle.len();
+    let end = xml[start..].find("</")? + start;
     Some(xml[start..end].trim().to_string())
 }
