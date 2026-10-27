@@ -121,11 +121,16 @@ pub async fn set_power(cfg: &AmtConfig, state: PowerState) -> Result<()> {
         if ret_val == "0" {
             Ok(())
         } else {
-            Err(anyhow!(
-                "WS‑Man request succeeded but ReturnValue is {} – body: {}",
-                ret_val,
-                body
-            ))
+            Err(match ret_val.trim() {
+                "2" => anyhow!(
+                    "the AMT refused the power change (ReturnValue 2): power off and \
+                     power cycle are rejected while a KVM or SOL session is open - \
+                     close the window first, then retry"
+                ),
+                other => anyhow!(
+                    "WS-Man request succeeded but ReturnValue is {other} - body: {body}"
+                ),
+            })
         }
     } else {
         Err(anyhow!("WS‑Man request returned {} – {}", status, body))

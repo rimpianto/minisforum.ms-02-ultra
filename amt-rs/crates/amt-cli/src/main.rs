@@ -236,6 +236,9 @@ async fn main() -> Result<()> {
                     });
                 }
 
+                println!(
+                    "commands: reset | on | off | bios | bios status | bios cancel | status | quit"
+                );
                 // Control thread: the terminal stays usable while the window
                 // shows the console, so power actions and their effects are one
                 // line apart.
@@ -251,9 +254,6 @@ async fn main() -> Result<()> {
                             Ok(rt) => rt,
                             Err(_) => return,
                         };
-                        println!(
-                            "commands: reset | on | off | bios | bios status | bios cancel | status | quit"
-                        );
                         let stdin = std::io::stdin();
                         for line in std::io::BufRead::lines(stdin.lock()) {
                             let line = match line {
