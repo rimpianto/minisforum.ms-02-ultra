@@ -131,10 +131,12 @@ Do not run `power --state off` or `power --state reset` on a host you care
 about: this client has no confirmation prompt.
 
 `off` deserves one more thought on a machine that is itself the site router (a
-router card inside the host): powering it off takes the LAN with it, and if the
-path you use to reach the AMT crosses that LAN, the AMT becomes unreachable and
-nothing can power the machine back on. `cycle` does not have this problem: the
-firmware performs the off/on itself, so no command has to arrive while the
-network is down. Before trusting `off` on such a host, check the route on the
-router that serves the management subnet: if it points at the card, do not.
+router card inside the host): powering it off takes that card, and everything
+behind it, down with the host. Whether that matters depends on where the AMT
+sits. If its port is wired to a dedicated management link, as on our host (a
+2.5GbE link straight to the management network, while the 10GbE link goes to
+the router the card also uses), the AMT stays reachable with the host off and
+`power --state on` brings it back. If instead the path to the AMT crosses the
+card, `off` strands the machine: nothing would be able to power it on again.
+`cycle` is safe either way, because the firmware performs the off/on itself.
 
