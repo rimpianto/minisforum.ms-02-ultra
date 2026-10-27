@@ -11,6 +11,68 @@ use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
 /// ver. 0.1.<commit count>: Cargo.toml is kept in step by
 /// scripts/sync-version.sh, so cargo and the program print the same number.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Colour is opt-in and only on a TTY: escape codes in a pipe are noise, and
+/// NO_COLOR asks us to stay quiet.
+static COLOR: AtomicU8 = AtomicU8::new(0);
+
+fn enable_color(on: bool) {
+    COLOR.store(if on { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+fn color() -> bool {
+    COLOR.load(Ordering::Relaxed) == 1
+}
+
+/// Wrap `text` in an SGR sequence when colour is on.
+fn paint(text: &str, code: &str) -> String {
+    if color() {
+        format!("\u{1b}[{code}m{text}\u{1b}[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn ok(text: &str) -> String {
+    paint(text, "32")
+}
+
+fn warn(text: &str) -> String {
+    paint(text, "33")
+}
+
+fn bad(text: &str) -> String {
+    paint(text, "31")
+}
+
+fn bold(text: &str) -> String {
+    paint(text, "1")
+}
+
+/// Same as `paint`, wrapped in the \x01..\x02 markers so the line editor does
+/// not count the escape sequence as visible characters.
+fn paint_prompt(text: &str, code: &str) -> String {
+    if color() {
+        format!("\u{1}\u{1b}[{code}m\u{2}{text}\u{1}\u{1b}[0m\u{2}")
+    } else {
+        text.to_string()
+    }
+}
+
+fn dim(text: &str) -> String {
+    paint(text, "2")
+}
+
+/// Colour a power state by what it means, so "8" is not just a number.
+fn paint_state(v: u8) -> String {
+    let name = format!("{v} ({})", state_name(v));
+    match v {
+        2 => ok(&name),
+        8 | 6 | 7 | 12 | 14 => warn(&name),
+        5 | 9 | 10 | 11 | 13 | 15 | 16 | 17 => paint(&name, "36"),
+        _ => name,
+    }
+}
 pub const GIT_HASH: &str = env!("AMT_GIT_HASH");
 pub const VERSION_LONG: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AMT_GIT_HASH"), ")");
 
@@ -91,7 +153,15 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    eprintln!("amt-cli {} ({})", VERSION, GIT_HASH);
+    {
+        use std::io::IsTerminal;
+        enable_color(
+            std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true),
+        );
+    }
+    eprintln!("{}", bold(&format!("amt-cli {} ({})", VERSION, GIT_HASH)));
     if let Commands::Replay { dir, out, width, height } = &cli.command {
         return replay_tiles(dir, out, *width, *height);
     }
@@ -147,7 +217,7 @@ async fn main() -> Result<()> {
             }
             amt_wsman::set_bios_setup(&ws_cfg, !cancel).await?;
             if cancel {
-                println!("BIOS setup request cleared");
+                println!("{}", ok("BIOS setup request cleared"));
             } else {
                 println!("next boot will stop in BIOS setup");
             }
@@ -286,7 +356,7 @@ async fn main() -> Result<()> {
 
                         if tty {
                             println!();
-                            println!("amt-rs {} - KVM window is live", VERSION);
+                            println!("{} - KVM window is live", bold(&format!("amt-rs {VERSION}")));
                             println!("  status | bios | bios status | bios cancel | boot-bios");
                             println!("  on | off | reset | cycle | quit  (help for this list)");
                             println!("  up/down recall the previous commands");
@@ -298,19 +368,19 @@ async fn main() -> Result<()> {
                                 std::process::exit(0);
                             }
                             if cmd == "help" || cmd == "?" {
-                                println!("  status        read the power state");
-                                println!("  bios          stop in BIOS setup on the next boot");
-                                println!("  bios status   is a setup boot pending?");
-                                println!("  bios cancel   clear the request");
-                                println!("  boot-bios     request it and reset now");
-                                println!("  on/off/reset  power actions (off and cycle release the console)");
-                                println!("  cycle         release the console, power cycle, reattach");
-                                println!("  quit          leave the session and close the window");
+                                println!("  {}        read the power state", bold("status"));
+                                println!("  {}          stop in BIOS setup on the next boot", bold("bios"));
+                                println!("  {}   is a setup boot pending?", bold("bios status"));
+                                println!("  {}   clear the request", bold("bios cancel"));
+                                println!("  {}     request it and reset now", bold("boot-bios"));
+                                println!("  {}  power actions (off and cycle release the console)", bold("on/off/reset"));
+                                println!("  {}         release the console, power cycle, reattach", bold("cycle"));
+                                println!("  {}          leave the session and close the window", bold("quit"));
                                 return;
                             }
                             rt.block_on(async {
                                 if let Err(e) = run_control(cmd, &ws_cfg, &link).await {
-                                    println!("error: {e}");
+                                    println!("{} {e}", bad("error:"));
                                 }
                             });
                         };
@@ -331,7 +401,7 @@ async fn main() -> Result<()> {
                             );
                             let _ = rl.load_history(&hist);
                             loop {
-                                match rl.readline("amt-rs> ") {
+                                match rl.readline(&format!("{} ", paint_prompt("amt-rs>", "1;36"))) {
                                     Ok(line) => {
                                         let cmd = line.trim().to_ascii_lowercase();
                                         if cmd.is_empty() {
@@ -725,11 +795,11 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
     match cmd {
         "reset" => {
             amt_wsman::set_power(ws, PowerState::Reset).await?;
-            println!("reset requested");
+            println!("{}", ok("reset requested"));
         }
         "on" => {
             amt_wsman::set_power(ws, PowerState::On).await?;
-            println!("power on requested");
+            println!("{}", ok("power on requested"));
         }
         "off" => {
             // Same rule as cycle: the firmware refuses to power off while a
@@ -762,23 +832,24 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
             if let Some(e) = last_err {
                 return Err(e);
             }
-            println!("powered off - the console reattaches when the machine is on again");
+            println!("{}", ok("powered off - the console reattaches when the machine is on again"));
         }
         "status" => {
             let (p, r) = amt_wsman::get_power_state(ws).await?;
             println!(
-                "PowerState={p} ({}) RequestedPowerState={r} ({})",
-                state_name(p),
-                state_name(r)
+                "PowerState={} RequestedPowerState={}",
+                paint_state(p),
+                paint_state(r)
             );
         }
         "bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
-            println!("BIOS setup requested for the next boot");
+            println!("{}", ok("BIOS setup requested for the next boot"));
         }
         "bios status" => {
             let pending = amt_wsman::bios_boot_pending(ws).await?;
-            println!("BIOSSetup pending: {}", if pending { "yes" } else { "no" });
+            let answer = if pending { warn("yes") } else { dim("no") };
+            println!("BIOSSetup pending: {answer}");
         }
         "bios cancel" => {
             amt_wsman::set_bios_setup(ws, false).await?;
@@ -823,14 +894,14 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
 
             link.store(0, Ordering::Relaxed);
             outcome?;
-            println!("power cycle requested - the console reattaches by itself");
+            println!("{}", ok("power cycle requested - the console reattaches by itself"));
         }
         "boot-bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
             amt_wsman::set_power(ws, PowerState::Reset).await?;
-            println!("setup requested, reset sent - watch the window");
+            println!("{}", ok("setup requested, reset sent - watch the window"));
         }
-        other => println!("unknown command '{other}'"),
+        other => println!("{}", bad(&format!("unknown command '{other}'"))),
     }
     Ok(())
 }
