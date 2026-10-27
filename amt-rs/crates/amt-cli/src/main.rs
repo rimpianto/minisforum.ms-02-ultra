@@ -691,46 +691,42 @@ async fn run_control(cmd: &str, ws: &WsmanConfig, link: &AtomicU8) -> Result<()>
             // Let go of the session first, otherwise the firmware refuses.
             link.store(1, Ordering::Relaxed);
             println!("releasing the console...");
-            // Wait for the socket to be closed, not for a guessed delay.
             for _ in 0..50 {
                 if link.load(Ordering::Relaxed) == 2 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
+
+            // State 5 (power cycle) is done by the firmware itself: it powers
+            // off and back on without needing the network, which matters here
+            // because the site router is a card inside this very machine.
             let outcome = async {
-                // The firmware can still report the session for a moment after
-                // the socket is gone, so a refusal is not final.
                 let mut last: Option<anyhow::Error> = None;
                 for attempt in 0..4 {
-                    match amt_wsman::set_power(ws, PowerState::OffHard).await {
+                    match amt_wsman::set_power(ws, PowerState::PowerCycle).await {
                         Ok(()) => {
                             last = None;
                             break;
                         }
                         Err(e) => {
                             last = Some(e);
-                            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-                            if attempt == 3 {
-                                break;
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                             }
                         }
                     }
                 }
-                if let Some(e) = last {
-                    return Err(e);
+                match last {
+                    Some(e) => Err(e),
+                    None => Ok(()),
                 }
-                println!("powered off, waiting before power on...");
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                amt_wsman::set_power(ws, PowerState::On).await?;
-                Ok(())
             }
             .await;
-            // Whatever happened, the console must reattach: leaving the link
-            // latched would leave a window that never comes back.
+
             link.store(0, Ordering::Relaxed);
             outcome?;
-            println!("power on sent - reattaching the console");
+            println!("power cycle requested - the console reattaches by itself");
         }
         "boot-bios" => {
             amt_wsman::set_bios_setup(ws, true).await?;
