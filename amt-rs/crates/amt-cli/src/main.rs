@@ -883,7 +883,7 @@ async fn kvm_capture(
         // boot is to disconnect on purpose and reconnect afterwards.
         if let Some(link) = link.as_ref() {
             if link.load(Ordering::Relaxed) == 1 {
-                eprintln!("[kvm] releasing the session for a power cycle");
+                eprintln!("[kvm] releasing the session (power action)");
                 return Ok(());
             }
         }
