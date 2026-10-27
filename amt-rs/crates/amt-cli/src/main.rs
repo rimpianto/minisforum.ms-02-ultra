@@ -236,13 +236,11 @@ async fn main() -> Result<()> {
                     });
                 }
 
-                println!(
-                    "commands: reset | on | off | bios | bios status | bios cancel | status | quit"
-                );
                 // Control thread: the terminal stays usable while the window
                 // shows the console, so power actions and their effects are one
                 // line apart.
                 {
+                    use std::io::{IsTerminal, Write};
                     let ws_cfg = WsmanConfig {
                         host: cfg.amt.host.clone(),
                         port: cfg.amt.port,
@@ -254,6 +252,15 @@ async fn main() -> Result<()> {
                             Ok(rt) => rt,
                             Err(_) => return,
                         };
+                        let tty = std::io::stdin().is_terminal();
+                        if tty {
+                            println!();
+                            println!("amt-rs {} - KVM window is live", VERSION);
+                            println!("  status | bios | bios status | bios cancel | boot-bios");
+                            println!("  on | off | reset | quit          (help for this list)");
+                            print!("amt-rs> ");
+                            let _ = std::io::stdout().flush();
+                        }
                         let stdin = std::io::stdin();
                         for line in std::io::BufRead::lines(stdin.lock()) {
                             let line = match line {
@@ -262,16 +269,34 @@ async fn main() -> Result<()> {
                             };
                             let cmd = line.trim().to_ascii_lowercase();
                             if cmd.is_empty() {
+                                if tty {
+                                    print!("amt-rs> ");
+                                    let _ = std::io::stdout().flush();
+                                }
                                 continue;
                             }
-                            if cmd == "quit" || cmd == "q" {
+                            if cmd == "quit" || cmd == "q" || cmd == "exit" {
                                 std::process::exit(0);
                             }
-                            rt.block_on(async {
-                                if let Err(e) = run_control(&cmd, &ws_cfg).await {
-                                    println!("error: {e}");
-                                }
-                            });
+                            if cmd == "help" || cmd == "?" {
+                                println!("  status       read the power state");
+                                println!("  bios         stop in BIOS setup on the next boot");
+                                println!("  bios status  is a setup boot pending?");
+                                println!("  bios cancel  clear the request");
+                                println!("  boot-bios    request it and reset now");
+                                println!("  on/off/reset power actions (off and power cycle need the window closed)");
+                                println!("  quit         leave the session and close the window");
+                            } else {
+                                rt.block_on(async {
+                                    if let Err(e) = run_control(&cmd, &ws_cfg).await {
+                                        println!("error: {e}");
+                                    }
+                                });
+                            }
+                            if tty {
+                                print!("amt-rs> ");
+                                let _ = std::io::stdout().flush();
+                            }
                         }
                     });
                 }
@@ -646,6 +671,11 @@ async fn run_control(cmd: &str, ws: &WsmanConfig) -> Result<()> {
         "bios cancel" => {
             amt_wsman::set_bios_setup(ws, false).await?;
             println!("BIOS setup request cleared");
+        }
+        "boot-bios" => {
+            amt_wsman::set_bios_setup(ws, true).await?;
+            amt_wsman::set_power(ws, PowerState::Reset).await?;
+            println!("setup requested, reset sent - watch the window");
         }
         other => println!("unknown command '{other}'"),
     }

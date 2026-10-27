@@ -284,11 +284,22 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                             if let Some(win) = window.as_ref() {
                                 if let Some(mon) = win.current_monitor() {
                                     let (mw, mh) = (mon.size().width as f64, mon.size().height as f64);
-                                    // Small framebuffers (POST, BIOS) get
-                                    // enlarged up to 2x: chunky but readable.
-                                    let factor = (mw * 0.92 / frame.width as f64)
-                                        .min(mh * 0.92 / frame.height as f64)
-                                        .min(2.0);
+                                    // Integer scaling only: a fractional
+                                    // nearest-neighbour upscale makes text
+                                    // ragged, which is what looked wrong in
+                                    // the setup screen.
+                                    let (aw, ah) = (mw * 0.92, mh * 0.92);
+                                    let fits = |k: f64| {
+                                        frame.width as f64 * k <= aw
+                                            && frame.height as f64 * k <= ah
+                                    };
+                                    let factor = if fits(2.0) {
+                                        2.0
+                                    } else if fits(1.0) {
+                                        1.0
+                                    } else {
+                                        (aw / frame.width as f64).min(ah / frame.height as f64)
+                                    };
                                     let _ = win.request_inner_size(
                                         winit::dpi::PhysicalSize::new(
                                             (frame.width as f64 * factor) as u32,
