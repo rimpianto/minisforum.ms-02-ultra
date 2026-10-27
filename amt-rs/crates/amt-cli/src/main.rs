@@ -8,10 +8,11 @@ use clap::{Parser, Subcommand};
 use config::load;
 use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
 
-/// ver. 0.1.<commit count>, filled in by build.rs so the number always moves.
-pub const VERSION: &str = env!("AMT_VERSION");
+/// ver. 0.1.<commit count>: Cargo.toml is kept in step by
+/// scripts/sync-version.sh, so cargo and the program print the same number.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_HASH: &str = env!("AMT_GIT_HASH");
-pub const VERSION_LONG: &str = concat!(env!("AMT_VERSION"), " (", env!("AMT_GIT_HASH"), ")");
+pub const VERSION_LONG: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AMT_GIT_HASH"), ")");
 
 #[derive(Parser)]
 #[command(name = "amt-cli", version = VERSION, long_version = VERSION_LONG, about = "Intel AMT command-line client")]
