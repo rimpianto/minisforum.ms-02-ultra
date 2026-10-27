@@ -26,5 +26,5 @@ fn main() {
     // else. Watching the directory or HEAD itself either misses commits or
     // rebuilds on unrelated activity, and every rerun of this script forces a
     // rebuild of the crate.
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    println!("cargo:rerun-if-changed=../../../.git/logs/HEAD");
 }
