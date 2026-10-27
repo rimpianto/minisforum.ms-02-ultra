@@ -298,6 +298,7 @@ fn be32(b: &[u8]) -> u32 {
 /// size and the bytes per pixel the device announced.
 async fn rfb_handshake(session: &mut amt_redir::Session) -> Result<(usize, usize, usize)> {
     let version = session.read_raw(12).await?;
+    eprintln!("[kvm] server RFB version: {}", String::from_utf8_lossy(&version).trim());
     let reply: Vec<u8> = if version.starts_with(b"RFB 003.") {
         version
     } else {
