@@ -25,6 +25,7 @@ hardware = the real device.
 | KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works on hardware** — 1920x1080, RGB565, real tiles decoded |
 | KVM video decoder | **works on hardware** — live capture of the host console, text legible, colours correct |
 | KVM window with keyboard and mouse (`kvm` without `--screenshot`) | **opens and streams on hardware** — winit 0.29 + softbuffer 0.4, keys and mouse forwarded as RFB events; input not yet exercised end to end |
+| Boot to BIOS setup (`bios`, `bios --status`, `--cancel`) | **works on hardware** — writes `AMT_BootSettingData.BIOSSetup`, verified by reading it back |
 | IDER (virtual CD/floppy) | not implemented |
 
 ### What still bites

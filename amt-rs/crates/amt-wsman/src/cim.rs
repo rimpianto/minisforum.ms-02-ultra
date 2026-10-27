@@ -9,6 +9,7 @@ pub enum PowerState {
     PowerCycle = 5,
     OffHard = 6,
     Hibernate = 7,
+    Reset = 10,
     // ... other states as needed
 }
 
@@ -17,7 +18,7 @@ impl PowerState {
         match s.to_ascii_lowercase().as_str() {
             "on" => Some(PowerState::On),
             "off" => Some(PowerState::OffHard),
-            "reset" => Some(PowerState::PowerCycle),
+            "reset" => Some(PowerState::Reset),
             _ => None,
         }
     }

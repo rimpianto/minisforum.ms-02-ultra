@@ -1,9 +1,11 @@
+mod boot;
 mod client;
 mod envelope;
 mod cim;
 mod config;
 mod error;
 
+pub use boot::{bios_boot_pending, set_bios_setup};
 pub use cim::PowerState;
 pub use error::AmtWsManError;
 

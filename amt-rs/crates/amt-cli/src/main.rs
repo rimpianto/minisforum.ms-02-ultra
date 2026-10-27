@@ -46,6 +46,18 @@ enum Commands {
         #[arg(long)]
         click: bool,
     },
+    /// Ask the firmware to stop in BIOS setup on the next boot
+    Bios {
+        /// Also reset the machine now, so it goes straight to setup
+        #[arg(long)]
+        reset: bool,
+        /// Only report whether a setup boot is pending
+        #[arg(long)]
+        status: bool,
+        /// Clear the request instead of setting it
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Rebuild a PNG from tiles captured with AMT_DUMP (offline decoder test)
     Replay {
         /// Directory written by AMT_DUMP
@@ -116,6 +128,33 @@ async fn main() -> Result<()> {
                     amt_wsman::set_power(&ws_cfg, power_state).await?;
                     println!("Power state change request sent (state = {})", requested);
                 }
+            }
+        }
+        Commands::Bios { reset, status, cancel } => {
+            let ws_cfg = WsmanConfig {
+                host: cfg.amt.host.clone(),
+                port: cfg.amt.port,
+                username: cfg.amt.username.clone(),
+                password: cfg.amt.password.clone(),
+            };
+            if status {
+                let pending = amt_wsman::bios_boot_pending(&ws_cfg).await?;
+                println!("BIOSSetup pending: {}", if pending { "yes" } else { "no" });
+                return Ok(());
+            }
+            amt_wsman::set_bios_setup(&ws_cfg, !cancel).await?;
+            if cancel {
+                println!("BIOS setup request cleared");
+            } else {
+                println!("next boot will stop in BIOS setup");
+            }
+            if cancel {
+                // nothing else to do
+            } else if reset {
+                amt_wsman::set_power(&ws_cfg, PowerState::Reset).await?;
+                println!("reset requested - keep the KVM window open to see the setup screen");
+            } else {
+                println!("when you are ready: amt-cli power --state reset");
             }
         }
         Commands::Replay { .. } => unreachable!("replay gestito prima della config"),

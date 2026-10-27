@@ -64,6 +64,24 @@ Opens the session, saves one full frame, exits. Useful to check the video path
 without any GUI. A completely black PNG usually means the host console is
 blanked (DPMS): touch the physical keyboard and retry, or add `--key shift`.
 
+## 5b. Boot straight into the BIOS setup
+
+Hitting Delete during POST is a reflex test: the KVM session takes seconds to
+come up and the window is a few hundred milliseconds wide. The firmware can be
+asked to stop in setup instead.
+
+```
+./target/release/amt-cli bios --status     # is a setup boot pending?
+./target/release/amt-cli bios              # ask for it on the next boot
+./target/release/amt-cli bios --reset      # ask, then reset now
+./target/release/amt-cli bios --cancel     # change your mind
+```
+
+The flag is stored in `AMT_BootSettingData.BIOSSetup` and the firmware clears
+it once it has been used, so it cannot get stuck. `--reset` while a KVM session
+is open is fine: the AMT rejects power off and power cycle during redirection,
+but a reset goes through, and the session stays attached so you see POST.
+
 ## 6. The window
 
 ```
