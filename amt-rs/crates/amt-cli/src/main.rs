@@ -574,7 +574,6 @@ async fn main() -> Result<()> {
                                     ("help", "this list"),
                                     ("quit", "leave the session and close the window"),
                                 ];
-                                println!("  {:<16}  {}", bold("command"), bold("what it does"));
                                 for (name, desc) in rows {
                                     println!("  {}  {}", bold(&format!("{name:<16}")), desc);
                                 }
