@@ -1,73 +1,61 @@
 # amt-rs — a native Intel AMT client
 
-Rust implementation of the AMT operations we actually need on the
-Minisforum MS-02 Ultra: power control now, KVM / SOL / IDER as the
-protocol work lands. One static binary, no Node.js runtime, no browser.
+Rust implementation of the AMT operations we need on the Minisforum MS-02
+Ultra: power control, KVM with working keyboard and mouse, boot to BIOS setup,
+and a control console beside the window. One static binary, no Node.js
+runtime, no browser.
 
-MeshCommander remains the reference implementation and the only usable
-console today, but its KVM is not workable for real operations
-(no copy-paste, poor rendering) and it drags in a Node.js process. The
-wire protocols are documented and small enough to own.
+MeshCommander stays the reference implementation - this client was written by
+watching what it puts on the wire - but it needs a Node.js process and its
+console is a browser page. The wire protocols are documented and small enough
+to own.
 
 ## State
 
-Verified against the AMT of this host (dedicated management LAN,
-`192.168.99.153`), October 2026. Mock = `tests/mock_redir.py`,
-hardware = the real device.
+**1.0.0** — everything below was exercised against the AMT of this host
+(dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
 |---|---|
-| WS-Man power control (`on` / `off` / `reset`) | **works on hardware** — HTTP 200, `ReturnValue 0` |
-| `ReturnValue` validation (client no longer trusts "HTTP 2xx = success") | done |
-| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | **works on hardware** — prints `PowerState=N (name)` |
-| Redirection transport + AAAH handshake (SOL, KVM) | **works on hardware** — TLS on `16995` (WS-Man port + 2) |
-| SOL: settings exchange, send/receive, `--interactive` | works against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
-| KVM video: RFB handshake, RAW/RLE decoders, `--screenshot` | **works on hardware** — 1920x1080, RGB565, real tiles decoded |
-| KVM video decoder | **works on hardware** — live capture of the host console, text legible, colours correct |
-| KVM window with keyboard and mouse (`kvm` without `--screenshot`) | **opens and streams on hardware** — winit 0.29 + softbuffer 0.4, keys and mouse forwarded as RFB events; input not yet exercised end to end |
-| Boot to BIOS setup (`bios`, `bios --status`, `--cancel`) | writes `AMT_BootSettingData.BIOSSetup` **and** activates the boot configuration with `SetBootConfigRole` (ReturnValue 0); the setup screen itself still to be confirmed on the next reset |
-| KVM window reconnects after a reset, terminal doubles as a control console (`reset`, `bios`, `status`, ...) | implemented |
+| Power: `on` (2), `off` (8), `reset` (10), `power cycle` (5) | **works on hardware**, `ReturnValue` validated (a 2xx is not success) |
+| Power-state query with names | **works** — `PowerState=8 (Off-Soft) RequestedPowerState=8 (Off-Soft)` |
+| Redirection transport + AAAH handshake | **works** — TLS on `16995` (WS-Man port + 2) |
+| KVM video, RAW / RLE / palette-RLE decoders | **works** — 1920x1080 RGB565, text legible, colours correct |
+| KVM window (winit + softbuffer) | **works** — scales to the window with integer factors, follows resolution changes (POST at 1024x768, desktop at 1920x1080), reconnects by itself |
+| Keyboard and mouse | **works** — physical-key mapping, modifiers held so `ctrl+c` and `ctrl+alt+f2` work |
+| Control console in the launching terminal | **works** — `status`, `bios`, `boot-bios`, `on`, `off`, `reset`, `cycle`, `quit`; history with arrows, colours on a TTY |
+| Boot to BIOS setup | **works** — writes `AMT_BootSettingData.BIOSSetup` and activates the boot configuration with `SetBootConfigRole`; the machine came up in setup without touching Delete |
+| SOL | settings exchange and I/O work against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
 | IDER (virtual CD/floppy) | not implemented |
 
 ### What still bites
 
-- **The redirection service accepts one client at a time.** While a
-  MeshCommander session is open (even an abandoned one) every connect gets
-  `StartRedirectionSession refused, status 2`. Stop the other client and wait
-  for the session to time out.
-- **The firmware encodes every tile that contains text with "palette RLE"**
+- **One redirection client at a time.** While another KVM (MeshCommander, a
+  stale window) holds the session every connect gets
+  `StartRedirectionSession refused, status 2`.
+- **Power off and power cycle are refused while a client is attached**
+  (`ReturnValue 2`). `off` and `cycle` therefore release the session first,
+  wait for the socket to close, and retry.
+- **`6` is not a valid power state here**: power down is `8`, power cycle is
+  `5`, reset is `10`. Sending 6 earns a `ReturnValue 2` that looks like a
+  session problem and is not.
+- **A power cycle is a hardware action**: the OS gets no ACPI shutdown, so
+  neither dmesg nor journal shows an orderly shutdown. Use `cycle` if the
+  machine must come back on its own, `off` only when you can power it on from
+  somewhere that survives the machine being down.
+- **The firmware encodes every tile containing text with palette RLE**
   (`subencoding > 129`): `subencoding - 128` RGB565 palette entries, then one
   index byte per run, where an index above 127 means the run length follows
-  (255 continues). Missing this branch is what made text come out as solid
-  blocks: those tiles were skipped, leaving only the solid background tiles.
-  The branch is now implemented in `decoder::draw_rle_tiles`.
-- **Keep asking for updates.** The device answers the first request with a
-  DesktopSize rect and nothing else; a client that only re-requests after
-  painting something stays black forever. Ask again after every update, drawn
-  or not, and again after an idle timeout.
-- **Do not let the redraw request feed itself**: winit repaints in a tight loop
-  (tens of thousands of redraws per second) unless the event loop waits on a
-  timer. The window polls the frame channel at 60 Hz with `ControlFlow::WaitUntil`.
-- **`amt-cli replay <dump-dir>`** rebuilds a PNG from tiles captured with
-  `AMT_DUMP`, which is how the decoder was fixed without a live screen.
-- **On macOS the winit event loop must own the main thread.** Creating it on a
-  worker thread panics with "EventLoop must be created on the main thread", so
-  the RFB session runs on its own thread with its own tokio runtime and the
-  window runs on main. `screencapture` needs Screen Recording permission, which
-  is why the window was verified by process state rather than pixel capture.
-- **Firmware flushes the deflate stream instead of closing it**, so a
-  `read_to_end` zlib decoder fails with "incomplete deflate stream"; use
-  `decoder::inflate_partial`. Tiles are always packed as full 64x64 blocks,
-  even at the right and bottom edges: consume 4096 pixels regardless of the
-  rectangle size or the next tile starts mid-stream.
-- **A blanked console sends nothing at all.** The device answers the first
-  update with a single `1920x1080` DesktopSize rect and then goes quiet: no
-  tiles, no pixels. `kvm --key shift` re-sends the key every 1.5s, which is the
-  right wire format (`[4, down, 0, 0, keysym_be32]`, the same bytes
-  MeshCommander sends) but on this firmware it did not bring the console back.
-  Touch the physical console and the next capture has content again.
-- **`AMT_DUMP=<dir>`** writes every RLE block and its inflated tile stream to
-  disk, so the decoder can be fixed offline instead of guessing from a PNG.
+  (255 continues). Without that branch text renders as solid blocks.
+- **The device flushes the deflate stream** instead of closing it, so
+  `read_to_end` fails; tiles are always packed as full 64x64 blocks even at the
+  edges.
+- **`AMT_BootSettingData` lives in the Intel namespace**
+  (`intel.com/wbem/wscim/1/amt-schema/1`), is a singleton addressed with no
+  selectors, and a Put needs the whole instance back minus the read-only
+  properties, or the firmware answers `SchemaValidationError`.
+- **On macOS the winit event loop must own the main thread**; the session runs
+  on its own thread with its own tokio runtime.
 
 ## Layout
 
@@ -169,11 +157,17 @@ enough to get `SchemaValidationError`.
 
 ## Roadmap
 
-1. KVM window (winit + softbuffer) with keyboard and mouse input — the frame
-   pipeline, decoders and input encoding are the missing glue.
-2. Dirty-rectangle updates instead of a full repaint per frame.
-3. IDER (virtual CD/floppy), the last piece before this can replace
+1. Dirty-rectangle updates: today the whole frame is repainted when a new one
+   arrives.
+2. IDER (virtual CD/floppy) and USB-R: the last pieces before this replaces
    MeshCommander for real work.
+3. SOL on hardware, once SOL/IDER is enabled in MEBx.
+4. Mouse wheel and clipboard through the KVM data channel.
+5. Windows and ARM64 builds.
+
+Versions up to 1.0.0 followed the commit count (`0.1.<n>`, written into the
+manifest by `scripts/sync-version.sh`). From 1.0.0 the version is a human
+decision.
 
 ## License
 

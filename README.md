@@ -174,19 +174,30 @@ All on BIOS 1.04, Proxmox VE (kernel 7.0.14-19-pve), card on RouterOS
 ## 6. amt-rs
 
 A native client for Intel AMT, written in Rust, living in
-[`amt-rs/`](amt-rs/) — one static binary, no Node.js. It exists because
-MeshCommander is the only usable AMT console today and its KVM is barely
-workable for real operations (no copy-paste, poor rendering), and because
-the KVM/SOL/IDER protocols are simple enough to be worth owning.
+[`amt-rs/`](amt-rs/) — one static binary, no Node.js, no browser. It exists
+because MeshCommander needs a Node process and a browser page, its KVM is
+barely workable for real operations, and because these protocols are simple
+enough to be worth owning.
 
-State as of October 2026:
+State at 1.0.0 (October 2026), all of it exercised on the real device:
 
 | Part | State |
 |---|---|
-| WS-Man power control (`on` / `off` / `reset`) | works, verified on this host: HTTP 200, `ReturnValue 0` |
-| `ReturnValue` validation (no "2xx = success") | done |
-| Power-state query (`Get` on `CIM_AssociatedPowerManagementService`) | in progress |
-| Redirection (KVM / SOL / IDER) | skeletons only |
+| Power: `on` / `off` / `reset` / `power cycle` | works — `ReturnValue` validated, states 2/8/10/5 |
+| Power-state query with human names | works — `PowerState=8 (Off-Soft)` |
+| KVM video | works — 1920x1080, decoders complete, text legible |
+| KVM window, keyboard, mouse | works — physical-key mapping, modifiers held for chords |
+| Control console beside the window | works — `status`, `bios`, `boot-bios`, `on`, `off`, `reset`, `cycle`, history, colours |
+| Boot to BIOS setup | works — the machine comes up in setup with no Delete key |
+| SOL | works against the mock; on hardware it needs SOL/IDER enabled in MEBx |
+| IDER / USB-R | not implemented |
+
+The part that costs the most time on this firmware is not the protocol logic
+but the details: the SOAP envelope for WS-Man, and the RFB quirks of the KVM
+(palette-RLE tiles, deflate streams that are flushed and never closed, power
+actions refused while a client is attached). Those are written down in
+[amt-rs/README.md](amt-rs/README.md#what-still-bites) so they are paid for
+once.
 
 The part that costs the most time on this firmware is the SOAP envelope,
 not the protocol logic. What the AMT here actually accepts:

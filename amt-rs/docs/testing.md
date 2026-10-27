@@ -90,11 +90,19 @@ launched it stays usable as a small control console:
 
 ```
 commands: status | bios | bios status | bios cancel | boot-bios
-          on | off | reset | cycle | quit
+          on | off | reset | cycle | quit          (help for this list)
 ```
 
 Type `bios`, then `reset`, and watch the window: the session drops, comes back
 by itself, and you are looking at the firmware. No Delete-key reflexes.
+
+Colours appear only on a terminal (`NO_COLOR` and `TERM=dumb` turn them off),
+and the arrows recall what you typed: history lives in `~/.amt/history`.
+
+`off` and `cycle` release the console first, because the firmware refuses a
+power off while a client is attached; the window then reattaches by itself, so
+`off` followed later by `on` brings the picture back without reopening
+anything.
 
 ## 6. The window
 
@@ -110,6 +118,11 @@ A window titled `amt-rs KVM` at the host resolution. While it is open:
 
 What is worth checking, in order: text legible and colours right, keys
 reaching the host, pointer reaching the host, window not tearing or freezing.
+
+The window follows the framebuffer resolution: POST and setup run at 640x480 or
+1024x768 while the desktop is 1920x1080, and small screens are enlarged by
+whole factors only - a fractional nearest-neighbour upscale is what makes text
+look ragged.
 
 On macOS the window cannot be screenshot by a background shell unless that
 shell has the Screen Recording permission; verify by eye.
