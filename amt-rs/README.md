@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.2.0** — everything below was exercised against the AMT of this host
+**1.2.1** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |

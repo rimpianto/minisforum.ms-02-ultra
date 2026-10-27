@@ -8,6 +8,36 @@ use clap::{Parser, Subcommand};
 use config::{load, with_env_overrides, Machine};
 use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
 
+/// Lines produced by the session thread while the prompt is open. They go
+/// through rustyline's external printer, which clears the line, writes the
+/// message and redraws the prompt with the text being typed; a plain eprintln
+/// leaves the cursor in the middle of the user's input.
+static KLOG: std::sync::OnceLock<
+    std::sync::Mutex<Option<Box<dyn rustyline::ExternalPrinter + Send>>>,
+> = std::sync::OnceLock::new();
+
+fn klog_line(mut line: String) {
+    // The external printer writes the string as given: without a trailing
+    // newline it is glued to the prompt that gets redrawn after it.
+    if !line.ends_with('\n') {
+        line.push('\n');
+    }
+    if let Some(slot) = KLOG.get() {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(printer) = guard.as_mut() {
+                if printer.print(line.clone()).is_ok() {
+                    return;
+                }
+            }
+        }
+    }
+    eprint!("{line}");
+}
+
+macro_rules! klog {
+    ($($arg:tt)*) => { klog_line(format!($($arg)*)) };
+}
+
 /// ver. 0.1.<commit count>: Cargo.toml is kept in step by
 /// scripts/sync-version.sh, so cargo and the program print the same number.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,11 +79,14 @@ fn bold(text: &str) -> String {
     paint(text, "1")
 }
 
-/// Same as `paint`, wrapped in the \x01..\x02 markers so the line editor does
-/// not count the escape sequence as visible characters.
+/// Prompt for the line editor: plain `paint` is enough, because rustyline
+/// measures ANSI sequences itself and does not need ignore markers.
 fn paint_prompt(text: &str, code: &str) -> String {
     if color() {
-        format!("\u{1}\u{1b}[{code}m\u{2}{text}\u{1}\u{1b}[0m\u{2}")
+        // rustyline measures the prompt by parsing the escape sequences itself
+        // and knows nothing about the \x01/\x02 markers used by linenoise: they
+        // would be written to the terminal as literal bytes.
+        format!("\u{1b}[{code}m{text}\u{1b}[0m")
     } else {
         text.to_string()
     }
@@ -385,7 +418,7 @@ async fn main() -> Result<()> {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
                             Err(e) => {
-                                eprintln!("tokio runtime: {e}");
+                                klog!("tokio runtime: {e}");
                                 std::process::exit(1);
                             }
                         };
@@ -427,7 +460,7 @@ async fn main() -> Result<()> {
                                 .await;
                                 first = false;
                                 if let Err(e) = outcome {
-                                    eprintln!("[kvm] session ended: {e}");
+                                    klog!("[kvm] session ended: {e}");
                                 }
                                 match link.load(Ordering::Relaxed) {
                                     // The socket is closed: tell the control
@@ -458,15 +491,12 @@ async fn main() -> Result<()> {
                                 // and the console alive so the machine can be
                                 // switched or retried by hand.
                                 if failures >= MAX_ATTEMPTS {
-                                    eprintln!(
-                                        "[kvm] {} attempts in a row failed on {}:{}",
+                                    klog!("[kvm] {} attempts in a row failed on {}:{}",
                                         failures, t.host, t.redir_port
                                     );
-                                    eprintln!(
-                                        "[kvm] the AMT is not answering: check the link, the address and that redirection is enabled"
+                                    klog!("[kvm] the AMT is not answering: check the link, the address and that redirection is enabled"
                                     );
-                                    eprintln!(
-                                        "[kvm] the console stays open - 'reconnect' tries again, 'use <name>' switches machine"
+                                    klog!("[kvm] the console stays open - 'reconnect' tries again, 'use <name>' switches machine"
                                     );
                                     loop {
                                         let state = link.load(Ordering::Relaxed);
@@ -484,7 +514,7 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 let delay = 2u64 << failures.min(3);
-                                eprintln!("[kvm] reconnecting in {delay}s...");
+                                klog!("[kvm] reconnecting in {delay}s...");
                                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                             }
                             std::process::exit(0);
@@ -527,18 +557,27 @@ async fn main() -> Result<()> {
                                 std::process::exit(0);
                             }
                             if cmd == "help" || cmd == "?" {
-                                println!("  {}        read the power state", bold("status"));
-                                println!("  {}          stop in BIOS setup on the next boot", bold("bios"));
-                                println!("  {}   is a setup boot pending?", bold("bios status"));
-                                println!("  {}   clear the request", bold("bios cancel"));
-                                println!("  {}     request it and reset now", bold("boot-bios"));
-                                println!("  {}  power actions (off and cycle release the console)", bold("on/off/reset"));
-                                println!("  {}         release the console, power cycle, reattach", bold("cycle"));
-                                println!("  {}      list the configured machines", bold("machines"));
-                                println!("  {}   attach this window to another machine", bold("use <name>"));
-                                println!("  {}  try the console again after giving up", bold("reconnect"));
-                                println!("  {}   save the current frame as a PNG ([file] optional)", bold("shot"));
-                                println!("  {}          leave the session and close the window", bold("quit"));
+                                // One table, one column width: the description
+                                // starts at the same column for every command.
+                                let rows: [(&str, &str); 13] = [
+                                    ("status", "read the power state"),
+                                    ("bios", "stop in BIOS setup on the next boot"),
+                                    ("bios status", "is a setup boot pending?"),
+                                    ("bios cancel", "clear the request"),
+                                    ("boot-bios", "request it and reset now"),
+                                    ("on|off|reset", "power actions (off and cycle release the console)"),
+                                    ("cycle", "release the console, power cycle, reattach"),
+                                    ("machines", "list the configured machines"),
+                                    ("use <name>", "attach this window to another machine"),
+                                    ("reconnect", "try the console again after giving up"),
+                                    ("shot [file]", "save the current frame as a PNG"),
+                                    ("help", "this list"),
+                                    ("quit", "leave the session and close the window"),
+                                ];
+                                println!("  {:<16}  {}", bold("command"), bold("what it does"));
+                                for (name, desc) in rows {
+                                    println!("  {}  {}", bold(&format!("{name:<16}")), desc);
+                                }
                                 return;
                             }
                             if cmd == "shot"
@@ -650,6 +689,27 @@ async fn main() -> Result<()> {
                                     return;
                                 }
                             };
+                            // Session-thread output goes through the editor, so
+                            // a "[kvm] reconnecting" never lands on top of the
+                            // line being typed: rustyline clears the row, prints
+                            // the message and redraws prompt and input.
+                            match rl.create_external_printer() {
+                                Ok(printer) => {
+                                    let boxed: Box<dyn rustyline::ExternalPrinter + Send> =
+                                        Box::new(printer);
+                                    match KLOG.get() {
+                                        Some(slot) => {
+                                            if let Ok(mut guard) = slot.lock() {
+                                                *guard = Some(boxed);
+                                            }
+                                        }
+                                        None => {
+                                            let _ = KLOG.set(std::sync::Mutex::new(Some(boxed)));
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("external printer: {e}"),
+                            }
                             // History sits beside the config file, wherever that
                             // was found (XDG location or the old ~/.amt).
                             let hist = config::history_path().to_string_lossy().to_string();
@@ -839,7 +899,7 @@ fn be32(b: &[u8]) -> u32 {
 /// size and the bytes per pixel the device announced.
 async fn rfb_handshake(session: &mut amt_redir::Session) -> Result<(usize, usize, usize)> {
     let version = session.read_raw(12).await?;
-    eprintln!("[kvm] server RFB version: {}", String::from_utf8_lossy(&version).trim());
+    klog!("[kvm] server RFB version: {}", String::from_utf8_lossy(&version).trim());
     let reply: Vec<u8> = if version.starts_with(b"RFB 003.") {
         version
     } else {
@@ -974,7 +1034,7 @@ async fn send_key(session: &mut amt_redir::Session, keysym: u32) -> Result<()> {
 /// "ctrl+l" means: hold ctrl, press l, release ctrl.
 async fn send_chord(session: &mut amt_redir::Session, spec: &str) -> Result<()> {
     if std::env::var("AMT_TRACE").is_ok() {
-        eprintln!("[kvm] sending key '{spec}'");
+        klog!("[kvm] sending key '{spec}'");
     }
     let parts: Vec<&str> = spec.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
     if parts.len() < 2 {
@@ -1178,14 +1238,14 @@ async fn run_kvm_session(
     link: Option<Arc<AtomicU8>>,
     shot: Option<Arc<std::sync::Mutex<Option<String>>>>,
 ) -> Result<()> {
-    eprintln!("[kvm] connecting to {host}:{redir_port}");
+    klog!("[kvm] connecting to {host}:{redir_port}");
     // Plain TCP probe first: if this fails the trouble is not TLS.
     match std::net::TcpStream::connect_timeout(
         &format!("{host}:{redir_port}").parse()?,
         std::time::Duration::from_secs(5),
     ) {
-        Ok(_) => eprintln!("[kvm] tcp ok"),
-        Err(e) => eprintln!("[kvm] tcp failed: {e}"),
+        Ok(_) => klog!("[kvm] tcp ok"),
+        Err(e) => klog!("[kvm] tcp failed: {e}"),
     }
     let mut session = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -1193,12 +1253,12 @@ async fn run_kvm_session(
     )
     .await
     .map_err(|_| anyhow::anyhow!("TLS connect timed out after 10s"))??;
-    eprintln!("[kvm] TLS up, authenticating");
+    klog!("[kvm] TLS up, authenticating");
     session.handshake(user, pass).await?;
-    eprintln!("[kvm] KVM session established with {host}:{redir_port}");
+    klog!("[kvm] KVM session established with {host}:{redir_port}");
 
     let (w, h, bpp) = rfb_handshake(&mut session).await?;
-    eprintln!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
+    klog!("[kvm] desktop {w}x{h} ({bpp} byte per pixel)");
 
     let fb = amt_kvm::Framebuffer::new(w, h);
     kvm_capture(
@@ -1274,7 +1334,7 @@ async fn kvm_capture(
         // Does the device parse our stream at all? A bogus type should either
         // kill the session or be ignored, and that tells us a lot.
         session.write_raw(&[0x99, 0, 0, 0, 0]).await?;
-        eprintln!("[kvm] sent a bogus message type 0x99");
+        klog!("[kvm] sent a bogus message type 0x99");
     }
 
     request_update(session, 0, 0, fb.width, fb.height).await?;
@@ -1292,7 +1352,7 @@ async fn kvm_capture(
         // boot is to disconnect on purpose and reconnect afterwards.
         if let Some(link) = link.as_ref() {
             if link.load(Ordering::Relaxed) != 0 {
-                eprintln!("[kvm] releasing the session (power action or machine switch)");
+                klog!("[kvm] releasing the session (power action or machine switch)");
                 return Ok(());
             }
         }
