@@ -88,11 +88,6 @@ async fn call(
     Ok(text)
 }
 
-/// AMT_BootSettingData is a singleton: it is addressed without selectors.
-fn selector_set(_name: &str, _value: &str) -> String {
-    String::new()
-}
-
 /// True if the device considers the next boot a BIOS-setup boot.
 pub async fn bios_boot_pending(cfg: &AmtConfig) -> Result<bool> {
     let xml = call(
