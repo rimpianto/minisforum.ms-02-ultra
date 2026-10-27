@@ -14,15 +14,33 @@ The binary is `target/release/amt-cli`.
 
 ## 2. Point it at the device
 
-Either a config file at `~/.amt/config.yaml`:
+Either a config file at `~/.amt/config.yaml`, which can hold several machines
+(one is used at a time):
 
 ```yaml
-amt:
-  host: 192.168.99.153
-  port: 16993
-  username: admin
-  password: CHANGE_ME
+default: ms02
+
+machines:
+  ms02:
+    host: 192.168.99.153
+    port: 16993
+    username: admin
+    password: CHANGE_ME
+  lab:
+    host: 192.168.99.160
+    port: 16993
+    username: admin
+    password: CHANGE_ME
 ```
+
+```sh
+amt-cli machines                  # what is configured, * marks the default
+amt-cli --machine lab power       # the same, against another machine
+```
+
+The single-machine form (`amt:` with `host`, `port`, `username`, `password`)
+still loads. Inside the KVM window `machines` lists them and `use <name>`
+reattaches the window to another one.
 
 or environment variables, which win over the file:
 

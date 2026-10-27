@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use clap::{Parser, Subcommand};
-use config::load;
+use config::{load, with_env_overrides, Machine};
 use amt_wsman::{self, PowerState, AmtConfig as WsmanConfig};
 
 /// ver. 0.1.<commit count>: Cargo.toml is kept in step by
@@ -79,12 +79,17 @@ pub const VERSION_LONG: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AM
 #[derive(Parser)]
 #[command(name = "amt-cli", version = VERSION, long_version = VERSION_LONG, about = "Intel AMT command-line client")]
 struct Cli {
+    /// Which configured machine to talk to; see `amt-cli machines`
+    #[arg(long, global = true)]
+    machine: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// List the machines in the config file
+    Machines,
     /// Change or query the power state
     Power {
         /// Desired state: "on", "off", or "reset"
@@ -148,6 +153,78 @@ enum Commands {
     },
 }
 
+/// Everything needed to attach to one machine, in one place: the session
+/// thread reads it before every connection, so `use <name>` in the console
+/// swaps machine without restarting the program.
+#[derive(Clone)]
+struct Target {
+    name: String,
+    host: String,
+    port: u16,
+    redir_port: u16,
+    user: String,
+    pass: String,
+}
+
+impl Target {
+    fn from_machine(m: &Machine) -> Self {
+        Self {
+            name: m.name.clone(),
+            host: m.amt.host.clone(),
+            port: m.amt.port,
+            redir_port: m.amt.redirection_port(),
+            user: m.amt.username.clone(),
+            pass: m.amt.password.clone(),
+        }
+    }
+
+    fn wsman(&self) -> WsmanConfig {
+        WsmanConfig {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.user.clone(),
+            password: self.pass.clone(),
+        }
+    }
+}
+
+/// `amt-cli machines`: what is configured, which one a bare command would use,
+/// and where it listens. No passwords, no key material.
+fn print_machines(cfg: &config::Config, requested: Option<&str>) -> Result<()> {
+    let all = cfg.list();
+    if all.is_empty() {
+        println!("no machines configured in ~/.amt/config.yaml");
+        return Ok(());
+    }
+
+    // Resolution can fail (two machines, no default): that is not an error
+    // here, the listing is exactly how you find out.
+    let current = cfg
+        .resolve(requested)
+        .map(|m| m.name)
+        .unwrap_or_default();
+    let width = all.iter().map(|m| m.name.len()).max().unwrap_or(0);
+
+    for m in &all {
+        let mark = if m.name == current { "*" } else { " " };
+        println!(
+            "{} {:<width$}  {}:{}  wsman {}  redirection {}  user {}",
+            mark,
+            m.name,
+            m.amt.host,
+            m.amt.port,
+            m.amt.port,
+            m.amt.redirection_port(),
+            m.amt.username,
+            width = width
+        );
+    }
+    if current.is_empty() {
+        println!("(no default: pick one with --machine <name> or set `default:` in the file)");
+    }
+    Ok(())
+}
+
 /// Async entry point – we need a Tokio runtime because the WS‑Man
 /// client is asynchronous.
 #[tokio::main]
@@ -166,15 +243,28 @@ async fn main() -> Result<()> {
         return replay_tiles(dir, out, *width, *height);
     }
     let cfg = load()?; // load once, reuse for all sub‑commands
+    let requested = cli.machine.clone();
+
+    // `machines` is the one command that does not need a valid choice: its job
+    // is to tell you what can be chosen.
+    if matches!(cli.command, Commands::Machines) {
+        print_machines(&cfg, requested.as_deref())?;
+        return Ok(());
+    }
+
+    // One machine at a time: the rest of the program only sees this one.
+    let machine = with_env_overrides(cfg.resolve(requested.as_deref())?)?;
+    let amt = machine.amt.clone();
 
     match cli.command {
+        Commands::Machines => unreachable!("handled before the config is resolved"),
         Commands::Power { state } => {
             // Convert CLI config into the WS‑Man config struct.
             let ws_cfg = WsmanConfig {
-                host: cfg.amt.host.clone(),
-                port: cfg.amt.port,
-                username: cfg.amt.username.clone(),
-                password: cfg.amt.password.clone(),
+                host: amt.host.clone(),
+                port: amt.port,
+                username: amt.username.clone(),
+                password: amt.password.clone(),
             };
 
             match state.as_deref() {
@@ -205,10 +295,10 @@ async fn main() -> Result<()> {
         }
         Commands::Bios { reset, status, cancel } => {
             let ws_cfg = WsmanConfig {
-                host: cfg.amt.host.clone(),
-                port: cfg.amt.port,
-                username: cfg.amt.username.clone(),
-                password: cfg.amt.password.clone(),
+                host: amt.host.clone(),
+                port: amt.port,
+                username: amt.username.clone(),
+                password: amt.password.clone(),
             };
             if status {
                 let pending = amt_wsman::bios_boot_pending(&ws_cfg).await?;
@@ -232,12 +322,10 @@ async fn main() -> Result<()> {
         }
         Commands::Replay { .. } => unreachable!("replay is handled before the config"),
         Commands::Kvm { seconds, screenshot, key, pointer, click } => {
-            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
-            // without TLS it is WS-Man + 2 as well (16992 -> 16994).
-            let redir_port = std::env::var("AMT_REDIR_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(cfg.amt.port + 2);
+            // The firmware serves redirection at WS-Man + 2 (16993 -> 16995);
+            // `redirection_port:` in the config, or AMT_REDIR_PORT, overrides
+            // that for a machine configured differently.
+            let redir_port = amt.redirection_port();
 
             let pointer_xy = match pointer.as_deref() {
                 None => None,
@@ -253,11 +341,13 @@ async fn main() -> Result<()> {
                 // On macOS the winit event loop must own the main thread, so the
                 // session gets its own thread and its own tokio runtime.
                 let (frame_tx, input_rx, gui) = gui::channels();
-                let host = cfg.amt.host.clone();
-                let user = cfg.amt.username.clone();
-                let pass = cfg.amt.password.clone();
+                // The session thread follows this: `use <name>` rewrites it and
+                // asks the current session to let go.
+                let target = Arc::new(std::sync::Mutex::new(Target::from_machine(&machine)));
+                let many = cfg.list().len() > 1;
                 let input_rx = std::sync::Arc::new(std::sync::Mutex::new(input_rx));
-                // 0 = attached, 1 = release the session (power cycle in progress)
+                // 0 = attached, 1 = release for a power action, 2 = released,
+                // 3 = release to attach to another machine
                 let link = Arc::new(AtomicU8::new(0));
 
                 // Session thread: reconnects by itself, because a power reset
@@ -267,6 +357,7 @@ async fn main() -> Result<()> {
                     let input_rx = input_rx.clone();
                     let key = key.clone();
                     let link = link.clone();
+                    let target = target.clone();
                     std::thread::spawn(move || {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
@@ -292,11 +383,15 @@ async fn main() -> Result<()> {
                                 if left.is_zero() {
                                     break;
                                 }
+                                // Read the target every time round: `use <name>`
+                                // may have pointed it somewhere else while the
+                                // previous session was letting go.
+                                let t = { target.lock().unwrap().clone() };
                                 let outcome = run_kvm_session(
-                                    &host,
-                                    redir_port,
-                                    &user,
-                                    &pass,
+                                    &t.host,
+                                    t.redir_port,
+                                    &t.user,
+                                    &t.pass,
                                     left.as_secs().max(1),
                                     if first { key.clone() } else { None },
                                     if first { pointer_xy } else { None },
@@ -310,10 +405,17 @@ async fn main() -> Result<()> {
                                 if let Err(e) = outcome {
                                     eprintln!("[kvm] session ended: {e}");
                                 }
-                                if link.load(Ordering::Relaxed) == 1 {
+                                match link.load(Ordering::Relaxed) {
                                     // The socket is closed: tell the control
                                     // thread it can talk to the firmware.
-                                    link.store(2, Ordering::Relaxed);
+                                    1 => link.store(2, Ordering::Relaxed),
+                                    // Switching machine: attach again straight
+                                    // away, the old host is not why we left.
+                                    3 => {
+                                        link.store(0, Ordering::Relaxed);
+                                        continue;
+                                    }
+                                    _ => {}
                                 }
                                 if tokio::time::Instant::now() >= deadline {
                                     break;
@@ -340,12 +442,8 @@ async fn main() -> Result<()> {
                 // line apart.
                 {
                     use std::io::IsTerminal;
-                    let ws_cfg = WsmanConfig {
-                        host: cfg.amt.host.clone(),
-                        port: cfg.amt.port,
-                        username: cfg.amt.username.clone(),
-                        password: cfg.amt.password.clone(),
-                    };
+                    let target = target.clone();
+                    let cfg = cfg;
                     std::thread::spawn(move || {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
@@ -357,6 +455,9 @@ async fn main() -> Result<()> {
                         if tty {
                             println!();
                             println!("{} - KVM window is live", bold(&format!("amt-rs {VERSION}")));
+                            if many {
+                                println!("  machine: {} (use <name> to switch, machines to list)", target.lock().unwrap().name);
+                            }
                             println!("  status | bios | bios status | bios cancel | boot-bios");
                             println!("  on | off | reset | cycle | quit  (help for this list)");
                             println!("  up/down recall the previous commands");
@@ -375,9 +476,51 @@ async fn main() -> Result<()> {
                                 println!("  {}     request it and reset now", bold("boot-bios"));
                                 println!("  {}  power actions (off and cycle release the console)", bold("on/off/reset"));
                                 println!("  {}         release the console, power cycle, reattach", bold("cycle"));
+                                println!("  {}      list the configured machines", bold("machines"));
+                                println!("  {}   attach this window to another machine", bold("use <name>"));
                                 println!("  {}          leave the session and close the window", bold("quit"));
                                 return;
                             }
+                            if cmd == "machines" || cmd == "hosts" {
+                                let current = target.lock().unwrap().name.clone();
+                                for m in cfg.list() {
+                                    let mark = if m.name == current { "*" } else { " " };
+                                    println!(
+                                        "{} {}  {}:{}",
+                                        mark, m.name, m.amt.host, m.amt.port
+                                    );
+                                }
+                                return;
+                            }
+                            // `use <name>`: keep the window, change the machine.
+                            // The session lets go, the session thread reads the
+                            // new target and attaches to it.
+                            if let Some(name) = cmd
+                                .strip_prefix("use ")
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                            {
+                                match cfg.resolve(Some(name)).and_then(with_env_overrides) {
+                                    Ok(m) => {
+                                        if link.load(Ordering::Relaxed) != 0 {
+                                            println!("the current session is still letting go, retry in a moment");
+                                            return;
+                                        }
+                                        let t = Target::from_machine(&m);
+                                        println!(
+                                            "switching to '{}' ({}:{})",
+                                            t.name, t.host, t.redir_port
+                                        );
+                                        *target.lock().unwrap() = t;
+                                        link.store(3, Ordering::Relaxed);
+                                    }
+                                    Err(e) => println!("{} {e}", bad("error:")),
+                                }
+                                return;
+                            }
+                            // The machine can have changed: every command reads
+                            // the target as it is now, not as it was at startup.
+                            let ws_cfg = target.lock().unwrap().wsman();
                             rt.block_on(async {
                                 if let Err(e) = run_control(cmd, &ws_cfg, &link).await {
                                     println!("{} {e}", bad("error:"));
@@ -401,7 +544,12 @@ async fn main() -> Result<()> {
                             );
                             let _ = rl.load_history(&hist);
                             loop {
-                                match rl.readline(&format!("{} ", paint_prompt("amt-rs>", "1;36"))) {
+                                let prompt = if many {
+                                    format!("amt-rs [{}]>", target.lock().unwrap().name)
+                                } else {
+                                    "amt-rs>".to_string()
+                                };
+                                match rl.readline(&format!("{} ", paint_prompt(&prompt, "1;36"))) {
                                     Ok(line) => {
                                         let cmd = line.trim().to_ascii_lowercase();
                                         if cmd.is_empty() {
@@ -445,10 +593,10 @@ async fn main() -> Result<()> {
             }
 
             run_kvm_session(
-                &cfg.amt.host,
+                &amt.host,
                 redir_port,
-                &cfg.amt.username,
-                &cfg.amt.password,
+                &amt.username,
+                &amt.password,
                 seconds,
                 key,
                 pointer_xy,
@@ -460,23 +608,18 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Sol { seconds, interactive } => {
-            // With TLS the redirection port is WS-Man + 2 (16993 -> 16995);
-        // without TLS it is WS-Man + 2 as well (16992 -> 16994).
-        let redir_port = std::env::var("AMT_REDIR_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(cfg.amt.port + 2);
+            let redir_port = amt.redirection_port();
             let mut session = amt_redir::sol::open(
-                &cfg.amt.host,
+                &amt.host,
                 redir_port,
-                &cfg.amt.username,
-                &cfg.amt.password,
+                &amt.username,
+                &amt.password,
             )
             .await?;
 
             println!(
                 "SOL session established with {}:{}",
-                cfg.amt.host, redir_port
+                amt.host, redir_port
             );
             if let Some(settings) = &session.serial_settings {
                 println!("serial settings: {:02x?}", settings);
@@ -1021,8 +1164,8 @@ async fn kvm_capture(
         // attached, so the only way to cycle the machine and still see the
         // boot is to disconnect on purpose and reconnect afterwards.
         if let Some(link) = link.as_ref() {
-            if link.load(Ordering::Relaxed) == 1 {
-                eprintln!("[kvm] releasing the session (power action)");
+            if link.load(Ordering::Relaxed) != 0 {
+                eprintln!("[kvm] releasing the session (power action or machine switch)");
                 return Ok(());
             }
         }

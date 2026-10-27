@@ -3,6 +3,11 @@
 What is left, why it matters, and what "done" means. Ordered by what I would
 do next, not by what is easiest.
 
+## Done after 1.0.0
+
+- [x] Several machines in the config (1.1.0): `--machine`, `machines`,
+      `use <name>` in the KVM console, legacy single-machine file still loads
+
 ## Done at 1.0.0
 
 - [x] WS-Man power: `on`, `off`, `reset`, `power cycle`, with `ReturnValue`

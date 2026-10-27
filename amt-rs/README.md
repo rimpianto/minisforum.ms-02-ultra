@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.0.1** — everything below was exercised against the AMT of this host
+**1.1.0** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
@@ -116,16 +116,45 @@ cargo build --release
 ./target/release/amt-cli kvm --screenshot out.png # decode one full frame
 ```
 
-Credentials come from `~/.amt/config.yaml` or from `AMT_HOST`, `AMT_PORT`,
-`AMT_USER`, `AMT_PASS`.
+Credentials come from `~/.amt/config.yaml`, where any number of machines can be
+listed, or from `AMT_HOST`, `AMT_PORT`, `AMT_USER`, `AMT_PASS`.
 
 Redirection listens two ports above WS-Man: **16993 → 16995** with TLS
 (16994 is the plain-text variant, used with 16992). Verified on hardware.
+`redirection_port:` in the config overrides that per machine.
 
 ## Configuration
 
 `~/.amt/config.yaml`, mode `0600`, never committed (see
-`config.example.yaml` and `.gitignore`):
+`config.example.yaml` and `.gitignore`). As many machines as you like, one at
+a time:
+
+```yaml
+default: ms02                 # what a bare command talks to
+machines:
+  ms02:
+    host: 192.168.99.153      # AMT of the Minisforum MS-02 Ultra
+    port: 16993               # WS-Man over TLS
+    username: admin
+    password: CHANGE_ME
+  lab:
+    host: 192.168.99.160
+    port: 16993
+    username: admin
+    password: CHANGE_ME
+    redirection_port: 16995   # optional; port + 2 when omitted
+```
+
+```sh
+./target/release/amt-cli machines             # what is configured, * = default
+./target/release/amt-cli --machine lab power  # one command on another machine
+./target/release/amt-cli --machine lab kvm    # console on another machine
+```
+
+Inside the KVM console `machines` lists them and `use <name>` reattaches the
+same window to another one, without closing it.
+
+The old single-machine form still loads, so an existing config does not break:
 
 ```yaml
 amt:
@@ -135,8 +164,10 @@ amt:
   password: CHANGE_ME
 ```
 
-There is no environment-variable override yet; if you need one, that is
-a small change in `crates/amt-cli/src/config/mod.rs`.
+Environment overrides, applied to the machine that was chosen: `AMT_HOST`,
+`AMT_PORT`, `AMT_USER`, `AMT_PASS`, `AMT_REDIR_PORT`, and `AMT_MACHINE` to
+choose the machine. With `AMT_HOST` set and no file at all the tool works as
+before: `AMT_HOST=192.168.99.153 AMT_PASS=... amt-cli power`.
 
 ## Testing against a live host
 

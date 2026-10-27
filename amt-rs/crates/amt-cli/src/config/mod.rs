@@ -1,65 +1,177 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 
-#[derive(Debug, Deserialize)]
+/// `~/.amt/config.yaml` holds any number of machines plus an optional default.
+/// The old single-machine form (`amt: { host: ... }`) still loads, so a config
+/// written before this change keeps working.
+#[derive(Debug, Deserialize, Default)]
 pub struct Config {
-    pub amt: AmtConfig,
+    /// Machine used when the command line does not name one.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// name -> machine; a BTreeMap so `amt-cli machines` lists them sorted.
+    #[serde(default)]
+    pub machines: BTreeMap<String, AmtConfig>,
+    /// Legacy single-machine block, used when `machines` is absent.
+    #[serde(default)]
+    pub amt: Option<AmtConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AmtConfig {
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_user")]
     pub username: String,
     pub password: String,
+    /// Where the redirection service listens. The firmware puts it at port + 2
+    /// (16993 -> 16995), which is what an omitted value means.
+    #[serde(default)]
+    pub redirection_port: Option<u16>,
+}
+
+fn default_port() -> u16 {
+    16993
+}
+
+fn default_user() -> String {
+    "admin".to_string()
 }
 
 impl Default for AmtConfig {
     fn default() -> Self {
         Self {
             host: String::new(),
-            port: 16993,
-            username: "admin".to_string(),
+            port: default_port(),
+            username: default_user(),
             password: String::new(),
+            redirection_port: None,
         }
     }
 }
 
-/// Configuration is read from `~/.amt/config.yaml`; every field can be
-/// overridden by an environment variable, so no file is needed on a machine
-/// where the tool is just being tested (AMT_HOST, AMT_PORT, AMT_USER, AMT_PASS).
+impl AmtConfig {
+    pub fn redirection_port(&self) -> u16 {
+        self.redirection_port.unwrap_or(self.port + 2)
+    }
+}
+
+/// A machine together with the name it is configured under.
+#[derive(Debug, Clone)]
+pub struct Machine {
+    pub name: String,
+    pub amt: AmtConfig,
+}
+
+impl Config {
+    /// Every configured machine, legacy block included.
+    pub fn list(&self) -> Vec<Machine> {
+        let mut out: Vec<Machine> = self
+            .machines
+            .iter()
+            .map(|(name, amt)| Machine {
+                name: name.clone(),
+                amt: amt.clone(),
+            })
+            .collect();
+        if out.is_empty() {
+            if let Some(amt) = self.amt.as_ref() {
+                out.push(Machine {
+                    name: "default".to_string(),
+                    amt: amt.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Which machine to talk to: an explicit name (--machine or AMT_MACHINE)
+    /// wins, then `default:`, then the only machine there is.
+    pub fn resolve(&self, requested: Option<&str>) -> Result<Machine> {
+        let all = self.list();
+        if all.is_empty() {
+            // No file at all: the environment alone is enough to work on one
+            // machine, which is how the tool is tried out.
+            if let Ok(host) = std::env::var("AMT_HOST") {
+                return Ok(Machine {
+                    name: "env".to_string(),
+                    amt: AmtConfig {
+                        host,
+                        ..AmtConfig::default()
+                    },
+                });
+            }
+            bail!("no AMT machine configured: create ~/.amt/config.yaml (see config.example.yaml) or set AMT_HOST");
+        }
+
+        let want = requested
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("AMT_MACHINE").ok())
+            .or_else(|| self.default.clone());
+
+        match want {
+            Some(name) => all.iter().find(|m| m.name == name).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no machine called '{}'; configured: {}",
+                    name,
+                    all.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            }),
+            None if all.len() == 1 => Ok(all[0].clone()),
+            None => bail!(
+                "several machines configured and none is the default: use --machine <name> or set default: ({})",
+                all.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+}
+
+/// Read the config file. Environment overrides are applied later, on the
+/// machine that was actually chosen.
 pub fn load() -> Result<Config> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let path = format!("{}/.amt/config.yaml", home);
 
-    let mut cfg = match fs::read_to_string(&path) {
+    match fs::read_to_string(&path) {
         Ok(contents) => serde_yaml::from_str::<Config>(&contents)
-            .with_context(|| format!("Failed to parse {}", path))?,
-        Err(_) => Config {
-            amt: AmtConfig::default(),
-        },
-    };
+            .with_context(|| format!("Failed to parse {}", path)),
+        Err(_) => Ok(Config::default()),
+    }
+}
 
+/// Apply AMT_HOST / AMT_PORT / AMT_USER / AMT_PASS / AMT_REDIR_PORT on top of
+/// the chosen machine, and refuse to go on with half a configuration.
+pub fn with_env_overrides(mut machine: Machine) -> Result<Machine> {
     if let Ok(v) = std::env::var("AMT_HOST") {
-        cfg.amt.host = v;
+        machine.amt.host = v;
     }
     if let Ok(v) = std::env::var("AMT_PORT") {
-        cfg.amt.port = v.parse().context("AMT_PORT is not a number")?;
+        machine.amt.port = v.parse().context("AMT_PORT is not a number")?;
     }
     if let Ok(v) = std::env::var("AMT_USER") {
-        cfg.amt.username = v;
+        machine.amt.username = v;
     }
     if let Ok(v) = std::env::var("AMT_PASS") {
-        cfg.amt.password = v;
+        machine.amt.password = v;
+    }
+    if let Ok(v) = std::env::var("AMT_REDIR_PORT") {
+        machine.amt.redirection_port = Some(v.parse().context("AMT_REDIR_PORT is not a number")?);
     }
 
-    if cfg.amt.host.is_empty() {
-        bail!("no AMT host: set AMT_HOST or create {}", path);
+    if machine.amt.host.is_empty() {
+        bail!(
+            "no AMT host for '{}': set AMT_HOST or fill it in ~/.amt/config.yaml",
+            machine.name
+        );
     }
-    if cfg.amt.password.is_empty() {
-        bail!("no AMT password: set AMT_PASS or create {}", path);
+    if machine.amt.password.is_empty() {
+        bail!(
+            "no AMT password for '{}': set AMT_PASS or fill it in ~/.amt/config.yaml",
+            machine.name
+        );
     }
-
-    Ok(cfg)
+    Ok(machine)
 }
