@@ -153,6 +153,11 @@ enum Commands {
     },
 }
 
+/// How many connection attempts in a row may fail before the session thread
+/// stops hammering an AMT that is not there. The console stays usable; a
+/// `reconnect` (or `use <name>`) starts it again.
+const MAX_ATTEMPTS: u32 = 3;
+
 /// Everything needed to attach to one machine, in one place: the session
 /// thread reads it before every connection, so `use <name>` in the console
 /// swaps machine without restarting the program.
@@ -423,9 +428,10 @@ async fn main() -> Result<()> {
                                     // The socket is closed: tell the control
                                     // thread it can talk to the firmware.
                                     1 => link.store(2, Ordering::Relaxed),
-                                    // Switching machine: attach again straight
-                                    // away, the old host is not why we left.
-                                    3 => {
+                                    // Switching machine, or a `reconnect`: attach
+                                    // again straight away, the old host is not
+                                    // why we left.
+                                    3 | 4 => {
                                         link.store(0, Ordering::Relaxed);
                                         continue;
                                     }
@@ -441,6 +447,36 @@ async fn main() -> Result<()> {
                                     failures = failures.saturating_add(1);
                                 } else {
                                     failures = 0;
+                                }
+                                // Nothing answers: stop instead of spending the
+                                // rest of the run retrying, but keep the window
+                                // and the console alive so the machine can be
+                                // switched or retried by hand.
+                                if failures >= MAX_ATTEMPTS {
+                                    eprintln!(
+                                        "[kvm] {} attempts in a row failed on {}:{}",
+                                        failures, t.host, t.redir_port
+                                    );
+                                    eprintln!(
+                                        "[kvm] the AMT is not answering: check the link, the address and that redirection is enabled"
+                                    );
+                                    eprintln!(
+                                        "[kvm] the console stays open - 'reconnect' tries again, 'use <name>' switches machine"
+                                    );
+                                    loop {
+                                        let state = link.load(Ordering::Relaxed);
+                                        if state == 3 || state == 4 {
+                                            link.store(0, Ordering::Relaxed);
+                                            failures = 0;
+                                            break;
+                                        }
+                                        if tokio::time::Instant::now() >= deadline {
+                                            std::process::exit(0);
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
+                                    }
+                                    continue;
                                 }
                                 let delay = 2u64 << failures.min(3);
                                 eprintln!("[kvm] reconnecting in {delay}s...");
@@ -492,6 +528,7 @@ async fn main() -> Result<()> {
                                 println!("  {}         release the console, power cycle, reattach", bold("cycle"));
                                 println!("  {}      list the configured machines", bold("machines"));
                                 println!("  {}   attach this window to another machine", bold("use <name>"));
+                                println!("  {}  try the console again after giving up", bold("reconnect"));
                                 println!("  {}          leave the session and close the window", bold("quit"));
                                 return;
                             }
@@ -504,6 +541,21 @@ async fn main() -> Result<()> {
                                         mark, m.name, m.amt.host, m.amt.port
                                     );
                                 }
+                                return;
+                            }
+                            if cmd == "reconnect" || cmd == "retry" {
+                                if link.load(Ordering::Relaxed) != 0 {
+                                    println!("the current session is still busy, retry in a moment");
+                                    return;
+                                }
+                                let t = target.lock().unwrap().clone();
+                                println!(
+                                    "reconnecting to '{}' ({}:{})",
+                                    t.name, t.host, t.redir_port
+                                );
+                                // The session thread treats 4 like a machine
+                                // switch: drop what it has and attach again.
+                                link.store(4, Ordering::Relaxed);
                                 return;
                             }
                             // `use <name>`: keep the window, change the machine.

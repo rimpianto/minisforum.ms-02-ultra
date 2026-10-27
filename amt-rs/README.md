@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.1.2** — everything below was exercised against the AMT of this host
+**1.1.3** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
@@ -23,7 +23,7 @@ to own.
 | KVM video, RAW / RLE / palette-RLE decoders | **works** — 1920x1080 RGB565, text legible, colours correct |
 | KVM window (winit + softbuffer) | **works** — scales to the window with integer factors, follows resolution changes (POST at 1024x768, desktop at 1920x1080), reconnects by itself |
 | Keyboard and mouse | **works** — physical-key mapping, modifiers held so `ctrl+c` and `ctrl+alt+f2` work |
-| Control console in the launching terminal | **works** — `status`, `bios`, `boot-bios`, `on`, `off`, `reset`, `cycle`, `quit`; history with arrows, colours on a TTY |
+| Control console in the launching terminal | **works** — `status`, `bios`, `boot-bios`, `on`, `off`, `reset`, `cycle`, `machines`, `use <name>`, `reconnect`, `quit`; history with arrows, colours on a TTY |
 | Boot to BIOS setup | **works** — writes `AMT_BootSettingData.BIOSSetup` and activates the boot configuration with `SetBootConfigRole`; the machine came up in setup without touching Delete |
 | SOL | settings exchange and I/O work against the mock; on hardware the device closes after the start request until SOL/IDER is enabled in MEBx |
 | IDER (virtual CD/floppy) | not implemented |
@@ -39,6 +39,11 @@ to own.
 - **`6` is not a valid power state here**: power down is `8`, power cycle is
   `5`, reset is `10`. Sending 6 earns a `ReturnValue 2` that looks like a
   session problem and is not.
+- **An AMT that is not there is not retried forever**: after three failed
+  connections in a row the session thread stops trying and says so, keeping
+  the window and the console alive; `reconnect` (or `use <name>`) starts it
+  again. Before this, an unreachable device filled the terminal until the
+  run expired.
 - **A power cycle is a hardware action**: the OS gets no ACPI shutdown, so
   neither dmesg nor journal shows an orderly shutdown. Use `cycle` if the
   machine must come back on its own, `off` only when you can power it on from

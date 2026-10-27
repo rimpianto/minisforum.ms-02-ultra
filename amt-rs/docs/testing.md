@@ -110,6 +110,7 @@ launched it stays usable as a small control console:
 ```
 commands: status | bios | bios status | bios cancel | boot-bios
           on | off | reset | cycle | quit          (help for this list)
+          machines | use <name> | reconnect       (more machines, retry)
 ```
 
 Type `bios`, then `reset`, and watch the window: the session drops, comes back
