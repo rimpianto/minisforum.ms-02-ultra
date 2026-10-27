@@ -76,6 +76,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    eprintln!("amt-cli {} ({})", VERSION, GIT_HASH);
     if let Commands::Replay { dir, out, width, height } = &cli.command {
         return replay_tiles(dir, out, *width, *height);
     }

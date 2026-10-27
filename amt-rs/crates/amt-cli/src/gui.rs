@@ -151,6 +151,25 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                         .build(elwt)
                         .expect("cannot create window"),
                 );
+
+                // The framebuffer is 16:9; a window clamped by a smaller screen
+                // keeps the picture letterboxed, so ask for the largest size
+                // that fits the monitor at the same ratio.
+                if let Some(mon) = win.current_monitor() {
+                    let scale = mon.scale_factor();
+                    let (mw, mh) = (mon.size().width as f64, mon.size().height as f64);
+                    let (avail_w, avail_h) = (mw * 0.92, mh * 0.92);
+                    let factor = (avail_w / width as f64)
+                        .min(avail_h / height as f64)
+                        .min(1.0);
+                    if factor < 0.999 {
+                        let _ = win.request_inner_size(winit::dpi::PhysicalSize::new(
+                            (width as f64 * factor) as u32,
+                            (height as f64 * factor) as u32,
+                        ));
+                    }
+                    let _ = scale;
+                }
                 let ctx = softbuffer::Context::new(win.clone()).expect("softbuffer context");
                 let mut surf =
                     softbuffer::Surface::new(&ctx, win.clone()).expect("softbuffer surface");
@@ -163,6 +182,14 @@ pub fn run_gui(gui: Gui) -> Result<()> {
                 }
                 win_w = win.inner_size().width.max(1);
                 win_h = win.inner_size().height.max(1);
+                // Paint it black straight away: until the first frame arrives
+                // the window would show the platform's white background.
+                if let Ok(mut buf) = surf.buffer_mut() {
+                    for px in buf.iter_mut() {
+                        *px = 0;
+                    }
+                    let _ = buf.present();
+                }
                 win.request_redraw();
                 window = Some(win);
                 _context = Some(ctx);
