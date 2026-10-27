@@ -179,7 +179,7 @@ because MeshCommander needs a Node process and a browser page, its KVM is
 barely workable for real operations, and because these protocols are simple
 enough to be worth owning.
 
-State at 1.2.3 (October 2026), all of it exercised on the real device:
+State at 1.2.4 (October 2026), all of it exercised on the real device:
 
 | Part | State |
 |---|---|

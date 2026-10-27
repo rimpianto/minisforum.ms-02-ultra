@@ -226,6 +226,25 @@ impl Target {
     }
 }
 
+/// Where `shot` writes when no path is given: a place you can find later,
+/// instead of the working directory (launched from a source tree, that fills
+/// up with PNGs nobody looks at).
+fn default_shot_path() -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = std::env::var_os("XDG_PICTURES_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = base.join("amt");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("amt-shot-{stamp}.png"))
+}
+
 /// `amt-cli machines`: what is configured, which one a bare command would use,
 /// and where it listens. No passwords, no key material.
 fn print_machines(cfg: &config::Config, requested: Option<&str>) -> Result<()> {
@@ -601,17 +620,7 @@ async fn main() -> Result<()> {
                                     .filter(|s| !s.is_empty());
                                 let path = match given {
                                     Some(p) => p.to_string(),
-                                    None => {
-                                        let stamp = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0);
-                                        let dir = std::env::current_dir()
-                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                        dir.join(format!("amt-shot-{stamp}.png"))
-                                            .to_string_lossy()
-                                            .to_string()
-                                    }
+                                    None => default_shot_path().to_string_lossy().to_string(),
                                 };
                                 match shot.lock() {
                                     Ok(mut slot) => {

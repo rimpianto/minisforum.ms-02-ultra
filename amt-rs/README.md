@@ -12,7 +12,7 @@ to own.
 
 ## State
 
-**1.2.3** — everything below was exercised against the AMT of this host
+**1.2.4** — everything below was exercised against the AMT of this host
 (dedicated management LAN, `192.168.99.153`), not only against the mock.
 
 | Part | State |
@@ -42,7 +42,8 @@ to own.
 - **A frame can be saved from the console** (`shot [file]`), not only with
   `kvm --screenshot`: the session thread already holds the decoded frame, so
   the write costs nothing and leaves the session attached. Without a path the
-  file lands in the working directory as `amt-shot-<epoch>.png`.
+  PNG lands in `$XDG_PICTURES_DIR/amt/` (`~/Pictures/amt/` normally) as
+  `amt-shot-<epoch>.png`, a place you can find again a week later.
 - **An AMT that is not there is not retried forever**: after three failed
   connections in a row the session thread stops trying and says so, keeping
   the window and the console alive; `reconnect` (or `use <name>`) starts it

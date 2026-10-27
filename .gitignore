@@ -2,3 +2,4 @@
 amt-rs/ref/meshcommander-inline.js
 # frames saved by `shot` in the console (test leftovers)
 amt-shot-*.png
+.DS_Store
