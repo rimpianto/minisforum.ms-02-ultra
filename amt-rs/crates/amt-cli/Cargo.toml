@@ -1,11 +1,13 @@
 [package]
 name = "amt-cli"
-version = "0.1.55"
+version = "0.1.56"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
+# Line editing and history for the control console.
+rustyline = "14"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 yaml-rust = "0.4"

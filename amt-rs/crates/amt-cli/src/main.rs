@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
                 // shows the console, so power actions and their effects are one
                 // line apart.
                 {
-                    use std::io::{IsTerminal, Write};
+                    use std::io::IsTerminal;
                     let ws_cfg = WsmanConfig {
                         host: cfg.amt.host.clone(),
                         port: cfg.amt.port,
@@ -281,52 +281,90 @@ async fn main() -> Result<()> {
                             Ok(rt) => rt,
                             Err(_) => return,
                         };
-                        let tty = std::io::stdin().is_terminal();
                         let link = link.clone();
+                        let tty = std::io::stdin().is_terminal();
+
                         if tty {
                             println!();
                             println!("amt-rs {} - KVM window is live", VERSION);
                             println!("  status | bios | bios status | bios cancel | boot-bios");
                             println!("  on | off | reset | cycle | quit  (help for this list)");
-                            print!("amt-rs> ");
-                            let _ = std::io::stdout().flush();
+                            println!("  up/down recall the previous commands");
                         }
-                        let stdin = std::io::stdin();
-                        for line in std::io::BufRead::lines(stdin.lock()) {
-                            let line = match line {
-                                Ok(l) => l,
-                                Err(_) => break,
-                            };
-                            let cmd = line.trim().to_ascii_lowercase();
-                            if cmd.is_empty() {
-                                if tty {
-                                    print!("amt-rs> ");
-                                    let _ = std::io::stdout().flush();
-                                }
-                                continue;
-                            }
+
+                        // One place that runs a command, used by both readers.
+                        let run = |cmd: &str| {
                             if cmd == "quit" || cmd == "q" || cmd == "exit" {
                                 std::process::exit(0);
                             }
                             if cmd == "help" || cmd == "?" {
-                                println!("  status       read the power state");
-                                println!("  bios         stop in BIOS setup on the next boot");
-                                println!("  bios status  is a setup boot pending?");
-                                println!("  bios cancel  clear the request");
-                                println!("  boot-bios    request it and reset now");
-                                println!("  on/off/reset  power actions (off and cycle release the console themselves)");
-                                println!("  cycle         release the console, power off, power on, reattach");
-                                println!("  quit         leave the session and close the window");
-                            } else {
-                                rt.block_on(async {
-                                    if let Err(e) = run_control(&cmd, &ws_cfg, &link).await {
-                                        println!("error: {e}");
-                                    }
-                                });
+                                println!("  status        read the power state");
+                                println!("  bios          stop in BIOS setup on the next boot");
+                                println!("  bios status   is a setup boot pending?");
+                                println!("  bios cancel   clear the request");
+                                println!("  boot-bios     request it and reset now");
+                                println!("  on/off/reset  power actions (off and cycle release the console)");
+                                println!("  cycle         release the console, power cycle, reattach");
+                                println!("  quit          leave the session and close the window");
+                                return;
                             }
-                            if tty {
-                                print!("amt-rs> ");
-                                let _ = std::io::stdout().flush();
+                            rt.block_on(async {
+                                if let Err(e) = run_control(cmd, &ws_cfg, &link).await {
+                                    println!("error: {e}");
+                                }
+                            });
+                        };
+
+                        if tty {
+                            // rustyline gives arrows, history and editing; the
+                            // history lives next to the config.
+                            let mut rl = match rustyline::DefaultEditor::new() {
+                                Ok(rl) => rl,
+                                Err(e) => {
+                                    eprintln!("line editor: {e}");
+                                    return;
+                                }
+                            };
+                            let hist = format!(
+                                "{}/.amt/history",
+                                std::env::var("HOME").unwrap_or_else(|_| ".".into())
+                            );
+                            let _ = rl.load_history(&hist);
+                            loop {
+                                match rl.readline("amt-rs> ") {
+                                    Ok(line) => {
+                                        let cmd = line.trim().to_ascii_lowercase();
+                                        if cmd.is_empty() {
+                                            continue;
+                                        }
+                                        let _ = rl.add_history_entry(cmd.as_str());
+                                        run(&cmd);
+                                    }
+                                    Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                                    Err(rustyline::error::ReadlineError::Eof) => break,
+                                    Err(e) => {
+                                        eprintln!("input: {e}");
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(dir) = std::path::Path::new(&hist).parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                            }
+                            let _ = rl.save_history(&hist);
+                        } else {
+                            // Piped input: no editing, no history, just lines.
+                            let stdin = std::io::stdin();
+                            for line in std::io::BufRead::lines(stdin.lock()) {
+                                let line = match line {
+                                    Ok(l) => l,
+                                    Err(_) => break,
+                                };
+                                let cmd = line.trim().to_ascii_lowercase();
+                                if cmd.is_empty() {
+                                    continue;
+                                }
+                                run(&cmd);
                             }
                         }
                     });
