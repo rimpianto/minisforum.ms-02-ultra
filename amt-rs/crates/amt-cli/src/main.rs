@@ -619,10 +619,13 @@ async fn kvm_capture(
                     // Waiting for the release to send the key-up means the
                     // host holds the key while we decode a frame, and the
                     // console repeats it (spaces everywhere, doubled letters).
-                    gui::Input::Key { keysym, down } => {
-                        if down {
-                            send_key(session, keysym).await?;
-                        }
+                    gui::Input::Key { keysym } => {
+                        send_key(session, keysym).await?;
+                    }
+                    gui::Input::Modifier { keysym, down } => {
+                        let mut msg = vec![4u8, down as u8, 0, 0];
+                        msg.extend_from_slice(&keysym.to_be_bytes());
+                        session.write_raw(&msg).await?;
                     }
                     gui::Input::Pointer { x, y, buttons } => {
                         send_pointer(session, x, y, buttons).await?;

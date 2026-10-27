@@ -20,8 +20,24 @@ pub struct Frame {
 
 /// Input events the UI sends back to the RFB thread.
 pub enum Input {
-    Key { keysym: u32, down: bool },
+    /// A whole keystroke: the loop sends down, a short hold, then up.
+    Key { keysym: u32 },
+    /// A modifier goes down and stays down until it is released, otherwise
+    /// ctrl+c and ctrl+alt+f2 are impossible.
+    Modifier { keysym: u32, down: bool },
     Pointer { x: u16, y: u16, buttons: u8 },
+}
+
+/// Modifiers we hold down for the host while the user keeps them pressed.
+fn modifier_keysym(key: &winit::keyboard::Key) -> Option<u32> {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::Shift) => Some(0xFFE1),
+        Key::Named(NamedKey::Control) => Some(0xFFE3),
+        Key::Named(NamedKey::Alt) => Some(0xFFE9),
+        Key::Named(NamedKey::Super) => Some(0xFFEB),
+        _ => None,
+    }
 }
 
 /// Map a winit key to an RFB keysym: printable ASCII plus what a console needs.
@@ -84,6 +100,7 @@ pub fn run_gui(gui: Gui) -> Result<()> {
     // The pointer position stays put between events: a button event that sends
     // (0,0) teleports the host cursor to the top-left corner.
     let mut pos = (0u16, 0u16);
+    let mut held_mods: Vec<u32> = Vec::new();
     let mut mask = 0u8;
 
     event_loop.run(move |event, elwt| {
@@ -129,11 +146,27 @@ pub fn run_gui(gui: Gui) -> Result<()> {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::KeyboardInput { event, .. } => {
-                    if let Some(k) = key_to_keysym(&event.logical_key) {
-                        let _ = gui.input.send(Input::Key {
-                            keysym: k,
-                            down: event.state == ElementState::Pressed,
-                        });
+                    if let Some(k) = modifier_keysym(&event.logical_key) {
+                        let down = event.state == ElementState::Pressed;
+                        if down != held_mods.contains(&k) {
+                            if down {
+                                held_mods.push(k);
+                            } else {
+                                held_mods.retain(|m| *m != k);
+                            }
+                            let _ = gui.input.send(Input::Modifier { keysym: k, down });
+                        }
+                    } else if event.state == ElementState::Pressed {
+                        if let Some(k) = key_to_keysym(&event.logical_key) {
+                            let _ = gui.input.send(Input::Key { keysym: k });
+                        }
+                    }
+                }
+                WindowEvent::Focused(false) => {
+                    // Do not leave ctrl stuck down on the host if the window
+                    // loses focus mid-chord.
+                    for k in held_mods.drain(..) {
+                        let _ = gui.input.send(Input::Modifier { keysym: k, down: false });
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
