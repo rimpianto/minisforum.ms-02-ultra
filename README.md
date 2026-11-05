@@ -13,7 +13,7 @@ Contents:
 3. [The link-disable workaround (LnkDisable)](#3-the-link-disable-workaround)
 4. [Boot hardening: GRUB, panic=, hardware watchdog](#4-boot-hardening)
 5. [Validation matrix](#5-validation-matrix)
-6. [amt-rs: a native AMT client (Rust)](#6-amt-rs)
+6. [amt-rs: the standalone AMT client](#6-amt-rs)
 
 ---
 
@@ -45,7 +45,8 @@ Once up you get:
 A minimal power-control client (~140 lines of Python, WS-Man Digest over
 TLS) is enough for `status / on / off / cycle`; MeshCommander works for
 interactive use but its KVM is barely usable (no copy-paste, poor
-rendering) — the native Rust rewrite lives in [amt-rs/](amt-rs/) in this
+rendering). The native Rust client now lives in the standalone
+[rimpianto/minisforum.amt-rs](https://github.com/rimpianto/minisforum.amt-rs)
 repository (see section 6).
 
 **Design rule:** the AMT port and the card management port must be on a
@@ -173,45 +174,23 @@ All on BIOS 1.04, Proxmox VE (kernel 7.0.14-19-pve), card on RouterOS
 
 ## 6. amt-rs
 
-A native client for Intel AMT, written in Rust, living in
-[`amt-rs/`](amt-rs/) — one static binary, no Node.js, no browser. It exists
-because MeshCommander needs a Node process and a browser page, its KVM is
-barely workable for real operations, and because these protocols are simple
-enough to be worth owning.
+The native Intel AMT/vPro client has moved to its own repository:
+[rimpianto/minisforum.amt-rs](https://github.com/rimpianto/minisforum.amt-rs).
 
-State at 1.2.4 (October 2026), all of it exercised on the real device:
+The standalone repository contains the complete Rust workspace, the build and
+hardware-testing documentation, the version helper, the preserved `amt-rs/`
+project history, and the annotated version tags through 1.2.4. It is no longer
+an MS-02-only component: the MS-01 KVM path is documented there as well, with
+firmware-specific limitations called out explicitly.
 
-| Part | State |
-|---|---|
-| Power: `on` / `off` / `reset` / `power cycle` | works — `ReturnValue` validated, states 2/8/10/5 |
-| Power-state query with human names | works — `PowerState=8 (Off-Soft)` |
-| KVM video | works — 1920x1080, decoders complete, text legible |
-| KVM window, keyboard, mouse | works — physical-key mapping, modifiers held for chords |
-| Control console beside the window | works — `status`, `bios`, `boot-bios`, `on`, `off`, `reset`, `cycle`, history, colours |
-| Boot to BIOS setup | works — the machine comes up in setup with no Delete key |
-| SOL | works against the mock; on hardware it needs SOL/IDER enabled in MEBx |
-| IDER / USB-R | not implemented |
+This repository now retains only the MS-02-specific platform notes: AMT and
+out-of-band recovery, the PCIe fabric freeze, the link-disable workaround and
+boot hardening. Client source code and client release management belong to the
+standalone repository.
 
-The part that costs the most time on this firmware is not the protocol logic
-but the details: the SOAP envelope for WS-Man, and the RFB quirks of the KVM
-(palette-RLE tiles, deflate streams that are flushed and never closed, power
-actions refused while a client is attached). Those are written down in
-[amt-rs/README.md](amt-rs/README.md#what-still-bites) so they are paid for
-once.
-
-The part that costs the most time on this firmware is the SOAP envelope,
-not the protocol logic. What the AMT here actually accepts:
-
-- `https` only, port **16993** (16992 is closed)
-- no `<w:OptionSet/>`, no `<w:OperationTimeout>`
-- `ManagedElement` must be a complete EPR: `Address` + `ReferenceParameters`
-  with `ResourceURI` for `CIM_ComputerSystem` and a `SelectorSet` with
-  `CreationClassName`/`Name=ManagedSystem`
-- one-line XML, nothing before `<?xml`, Digest auth over TLS
-
-Details, build instructions and the config layout:
-[amt-rs/README.md](amt-rs/README.md). What is still missing, and what "done"
-means for each piece: [amt-rs/TODO.md](amt-rs/TODO.md).
+For build instructions, configuration and current support status, see the
+[amt-rs README](https://github.com/rimpianto/minisforum.amt-rs#readme) and its
+[hardware testing guide](https://github.com/rimpianto/minisforum.amt-rs/blob/main/docs/testing.md).
 
 ---
 
